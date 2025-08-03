@@ -2,7 +2,7 @@ use pill_engine::game::*;
 
 use crate::game::{PlayerTagComponent, TargetTransformComponent};
 
-pub fn player_movement_system(engine: &mut Engine) -> Result<()> {
+pub fn player_physics_movement_system(engine: &mut Engine) -> Result<()> {
     let input_component = engine.get_global_component::<InputComponent>()?;
     let delta_time = engine.get_global_component::<TimeComponent>()?.delta_time;
 
@@ -46,7 +46,7 @@ pub fn player_movement_system(engine: &mut Engine) -> Result<()> {
 
     for (_, transform_component, target_transform_component, player_tag_component) in 
         engine.iterate_three_components_mut::<TransformComponent, TargetTransformComponent, PlayerTagComponent>()? {
-println!("Player movement system: wadawd");
+
         // --- Input updates target transform ---
         if w_key || pad_fwd {
             target_transform_component.0.translate(final_speed, Direction::Forward);
