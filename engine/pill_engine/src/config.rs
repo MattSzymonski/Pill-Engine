@@ -1,13 +1,17 @@
 use crate::{
-    ecs::{ audio_system, deferred_update_system, input_system, rendering_system, time_system, AudioManagerComponent, DeferredUpdateComponent, EguiManagerComponent, InputComponent, SystemFunction, TimeComponent, UpdatePhase }, 
-    graphics::{ RendererMaterialHandle, RendererTextureHandle }, 
-    resources::{ MaterialHandle, TextureHandle, TextureType },
+    ecs::{
+        audio_system, deferred_update_system, input_system, rendering_system, time_system,
+        AudioManagerComponent, DeferredUpdateComponent, EguiManagerComponent, InputComponent,
+        RenderStateComponent, SystemFunction, TimeComponent, UpdatePhase,
+    },
+    graphics::RendererTextureHandle,
+    resources::{TextureHandle, TextureType},
 };
 
-use pill_core::PillSlotMapKeyData;
+use pill_core::{Handle, PillSlotMapKeyData};
 
-use std::{num::NonZeroU32, any::TypeId};
 use lazy_static::lazy_static;
+use std::{any::TypeId, num::NonZeroU32};
 
 // --- General ---
 
@@ -57,14 +61,21 @@ pub const RENDERING_SYSTEM: SystemConfig = SystemConfig {
 };
 
 // --- Resources ---
-
+//
+// Diagnostics (glTF import):
+// - Set `LOG_GLTF_IMPORT = true` in runtime config to log imported meshes/materials/texture bindings.
+// - Run with `RUST_LOG=info RUST_BACKTRACE=1` to see logs.
+// - If materials show no textures bound, the asset may use KTX2/Basis images; use PNG/JPG variants
+//   (e.g., glTF-Sample-Models “glTF-Binary”) or add Basis/KTX2 transcode support.
+//
 pub const RESOURCE_VERSION_LIMIT: usize = 255;
 
 pub const MAX_PIPELINES: usize = 10;
-pub const MAX_TEXTURES: usize = 10;
-pub const MAX_MATERIALS: usize = 10;
-pub const MAX_MESHES: usize = 10;
+pub const MAX_TEXTURES: usize = 1000;
+pub const MAX_MATERIALS: usize = 1000;
+pub const MAX_MESHES: usize = 1000;
 pub const MAX_SOUNDS: usize = 10;
+pub const MAX_MODELS: usize = 1000;
 
 // Convention: All resource names starting with "pill_default" are restricted, cannot be added and removed from game
 pub const DEFAULT_RESOURCE_PREFIX: &str = "pill_default";
@@ -91,38 +102,36 @@ pub const RENDER_QUEUE_KEY_MESH_INDEX_IDX: u8 = 3;
 pub const RENDER_QUEUE_KEY_MESH_VERSION_IDX: u8 = 4;
 
 // Default resource handle - Color texture
-pub const DEFAULT_COLOR_TEXTURE_HANDLE: TextureHandle = TextureHandle { 
-    0: PillSlotMapKeyData { index: 1, version: unsafe { std::num::NonZeroU32::new_unchecked(1) } } 
+pub const DEFAULT_COLOR_TEXTURE_HANDLE: TextureHandle = TextureHandle {
+    0: PillSlotMapKeyData {
+        index: 1,
+        version: unsafe { std::num::NonZeroU32::new_unchecked(1) },
+    },
 };
-pub const DEFAULT_RENDERER_COLOR_TEXTURE_HANDLE: RendererTextureHandle = RendererTextureHandle { 
-    0: PillSlotMapKeyData { index: 1, version: unsafe { std::num::NonZeroU32::new_unchecked(1) } } 
-};
+pub const DEFAULT_RENDERER_COLOR_TEXTURE_HANDLE: RendererTextureHandle = Handle::from_parts(1, 1);
 
 // Default resource handle - Normal texture
-pub const DEFAULT_NORMAL_TEXTURE_HANDLE: TextureHandle = TextureHandle { 
-    0: PillSlotMapKeyData { index: 2, version: unsafe { std::num::NonZeroU32::new_unchecked(1) } } 
+pub const DEFAULT_NORMAL_TEXTURE_HANDLE: TextureHandle = TextureHandle {
+    0: PillSlotMapKeyData {
+        index: 2,
+        version: unsafe { std::num::NonZeroU32::new_unchecked(1) },
+    },
 };
-pub const DEFAULT_RENDERER_NORMAL_TEXTURE_HANDLE: RendererTextureHandle = RendererTextureHandle { 
-    0: PillSlotMapKeyData { index: 2, version: unsafe { std::num::NonZeroU32::new_unchecked(1) } } 
-};
+pub const DEFAULT_RENDERER_NORMAL_TEXTURE_HANDLE: RendererTextureHandle = Handle::from_parts(2, 1);
 
-pub fn get_default_texture_handles(texture_type: TextureType) -> (TextureHandle, RendererTextureHandle) {
+pub fn get_default_texture_handles(
+    texture_type: TextureType,
+) -> (TextureHandle, RendererTextureHandle) {
     match texture_type {
-        TextureType::Color => (DEFAULT_COLOR_TEXTURE_HANDLE, DEFAULT_RENDERER_COLOR_TEXTURE_HANDLE),
-        TextureType::Normal => (DEFAULT_NORMAL_TEXTURE_HANDLE, DEFAULT_RENDERER_NORMAL_TEXTURE_HANDLE),
+        TextureType::Gamma => (
+            DEFAULT_COLOR_TEXTURE_HANDLE,
+            DEFAULT_RENDERER_COLOR_TEXTURE_HANDLE,
+        ),
+        TextureType::Linear => (
+            DEFAULT_NORMAL_TEXTURE_HANDLE,
+            DEFAULT_RENDERER_NORMAL_TEXTURE_HANDLE,
+        ),
     }
-}
-
-// Default resource handle - Material
-pub const DEFAULT_MATERIAL_HANDLE: MaterialHandle = MaterialHandle { 
-    0: PillSlotMapKeyData { index: 1, version: unsafe { std::num::NonZeroU32::new_unchecked(1) } } 
-};
-pub const DEFAULT_RENDERER_MATERIAL_HANDLE: RendererMaterialHandle = RendererMaterialHandle { 
-    0: PillSlotMapKeyData { index: 1, version: unsafe { std::num::NonZeroU32::new_unchecked(1) } } 
-};
-
-pub fn get_default_material_handles() -> (MaterialHandle, RendererMaterialHandle) {
-    (DEFAULT_MATERIAL_HANDLE, DEFAULT_RENDERER_MATERIAL_HANDLE)
 }
 
 lazy_static! {
@@ -131,6 +140,7 @@ lazy_static! {
         TypeId::of::<TimeComponent>(),
         TypeId::of::<AudioManagerComponent>(),
         TypeId::of::<DeferredUpdateComponent>(),
-        TypeId::of::<EguiManagerComponent>()
+        TypeId::of::<EguiManagerComponent>(),
+        TypeId::of::<RenderStateComponent>()
     );
 }

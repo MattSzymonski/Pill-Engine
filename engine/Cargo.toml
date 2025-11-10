@@ -5,9 +5,18 @@ members = [
     "pill_engine",
     "pill_renderer",
     "pill_standalone",
-    "NO_PATH", ### Game project crate (This will be changed by Pill Launcher on build to allow proper compilation of game project)
+    "/Users/mk/dev/demo/pill_demo", ### Game project crate (This will be changed by Pill Launcher on build to allow proper compilation of game project)
 ]
 
 exclude = [
     "pill_launcher",
 ]
+
+[profile.dev]
+opt-level = 3
+incremental = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

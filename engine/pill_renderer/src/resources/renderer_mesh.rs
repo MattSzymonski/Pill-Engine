@@ -1,7 +1,7 @@
-use pill_engine::internal::{ MeshData, MeshVertex };
+use pill_engine::internal::{MeshData, MeshVertex};
 
-use wgpu::util::DeviceExt;
 use anyhow::*;
+use wgpu::util::DeviceExt;
 
 // --- Vertex ---
 
@@ -16,11 +16,12 @@ pub struct RendererMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+    pub aabb_min: [f32; 3],
+    pub aabb_max: [f32; 3],
 }
 
 impl RendererMesh {
-    pub fn new(device: &wgpu::Device, name: &str, mesh_data: &MeshData) -> Result<Self> { 
-
+    pub fn new(device: &wgpu::Device, name: &str, mesh_data: &MeshData) -> Result<Self> {
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(&format!("{:?}_vertex_buffer", name)),
             contents: bytemuck::cast_slice(&mesh_data.vertices),
@@ -37,6 +38,8 @@ impl RendererMesh {
             vertex_buffer,
             index_buffer,
             index_count: mesh_data.indices.len() as u32,
+            aabb_min: mesh_data.aabb_min,
+            aabb_max: mesh_data.aabb_max,
         };
 
         Ok(renderer_mesh)
@@ -45,39 +48,18 @@ impl RendererMesh {
 
 impl Vertex for RendererMesh {
     fn data_layout_descriptor<'a>() -> wgpu::VertexBufferLayout<'a> {
-        use std::mem;
+        // Use a static attribute array to satisfy lifetime requirements
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            0 => Float32x3, // position
+            1 => Float32x2, // uv
+            2 => Float32x3, // normal
+            3 => Float32x3, // tangent
+            4 => Float32x3, // bitangent
+        ];
         wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute { // Vertex position
-                    offset: 0,  
-                    shader_location: 0, 
-                    format: wgpu::VertexFormat::Float32x3, 
-                },
-                wgpu::VertexAttribute { // Vertex texture coordinates
-                    offset: mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute { // Vertex normal
-                    offset: mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute { // Vertex tangent
-                    offset: mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                wgpu::VertexAttribute { // Vertex bitangent
-                    offset: mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
+            attributes: &ATTRS,
         }
     }
 }
-
-
