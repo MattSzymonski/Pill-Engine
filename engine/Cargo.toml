@@ -5,7 +5,6 @@ members = [
     "pill_assets",
     "pill_core",
     "pill_engine",
-    "pill_renderer",
     "pill_native",
     "pill_web",
     "pill_runtime",
