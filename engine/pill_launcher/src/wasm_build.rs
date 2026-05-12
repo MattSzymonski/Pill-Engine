@@ -29,6 +29,7 @@ pub fn build(game_project_directory_path: &Path, compile_mode: &CompileMode) -> 
     let scratch_pill_web_app_dir = build_wasm_dir.join(".build").join("pill_web_app");
     let scratch_pkg_dir = build_wasm_dir.join(".build").join("pkg");
 
+    fix_game_workspace(game_project_directory_path)?;
     prepare_scratch_crate(&wasm_template_dir, &scratch_pill_web_app_dir)?;
     embed_game_config(game_project_directory_path, &scratch_pill_web_app_dir)?;
     rewrite_scratch_manifest(&scratch_pill_web_app_dir, game_project_directory_path)?;
@@ -59,6 +60,26 @@ pub fn build(game_project_directory_path: &Path, compile_mode: &CompileMode) -> 
     println!("  PillLauncher -a run -t wasm -p {game_project_directory_path:?}");
     println!("  (or any static server pointed at {build_wasm_dir:?})");
     Ok(())
+}
+
+fn fix_game_workspace(game_dir: &Path) -> Result<()> {
+    use crate::normalize_path;
+    let game_manifest = game_dir.join("Cargo.toml");
+    let engine_ws = get_path(Location::EngineCrates);
+    let engine_ws_str = normalize_path(&engine_ws)?;
+    let expected = format!("workspace = \"{}\"", engine_ws_str);
+    let text = fs::read_to_string(&game_manifest)
+        .with_context(|| format!("Failed to read {game_manifest:?}"))?;
+    if text.lines().any(|l| l.trim_start().starts_with("workspace") && l.contains(&engine_ws_str)) {
+        return Ok(());
+    }
+    modify_file(&game_manifest, &game_manifest, |line: String| {
+        if line.trim_start().starts_with("workspace") {
+            expected.clone()
+        } else {
+            line
+        }
+    })
 }
 
 fn template_dir(name: &str) -> PathBuf {

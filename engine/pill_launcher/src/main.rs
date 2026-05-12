@@ -459,9 +459,9 @@ fn render_puml_for_crate(crate_dir: &Path) -> Result<()> {
         .status()
         .is_ok();
 
-    // Prefer "plantuml" CLI tool if available
     if !have_cli {
-        bail!("Please install plantuml!");
+        println!("plantuml not found, skipping diagram rendering");
+        return Ok(());
     }
 
     for puml in &inputs {
@@ -802,7 +802,7 @@ fn build_game_project(
         .join("target_games")
         .join(&game_title);
 
-    // Pre-render PUML only for non-hot-reload builds
+    // Pre-render PUML only for non-hot-reload builds (no-op if plantuml not installed)
     let pill_engine_dir = get_path(Location::PillEngineCrate);
     if *compile_mode != CompileMode::HotReload {
         render_puml_for_crate(&pill_engine_dir)
@@ -1002,7 +1002,7 @@ fn generate_docs(output_directory_path: &PathBuf) -> Result<()> {
     let engine_crate_manifest_path = get_path(Location::PillEngineCrate).join("Cargo.toml");
     let full_engine_manifest_path = empty_example_game_path.join("Cargo.toml");
 
-    // Pre-render all PUML in the engine crate
+    // Pre-render all PUML in the engine crate (no-op if plantuml not installed)
     let pill_engine_dir = get_path(Location::PillEngineCrate);
     render_puml_for_crate(&pill_engine_dir)
         .context("Failed to render PlantUML diagrams for pill_engine")?;

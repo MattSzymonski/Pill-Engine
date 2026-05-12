@@ -146,7 +146,7 @@ impl Engine {
                     ShaderParameterSlot::new(ShaderParameterType::Color),
                 ),
                 (
-                    DEFAULT_LIT_SHADER_SPECULARITY_PARAMETER_SLOT_NAME.to_string(),
+                    DEFAULT_LIT_SHADER_SPEC_PARAMETER_SLOT_NAME.to_string(),
                     ShaderParameterSlot::new(ShaderParameterType::Scalar),
                 ),
             ]
@@ -235,7 +235,7 @@ impl Engine {
                     DEFAULT_LIT_SHADER_TINT_PARAMETER_SLOT_NAME,
                     Color::new(1.0, 1.0, 1.0),
                 )?
-                .scalar_parameter(DEFAULT_LIT_SHADER_SPECULARITY_PARAMETER_SLOT_NAME, 0.5)?
+                .scalar_parameter(DEFAULT_LIT_SHADER_SPEC_PARAMETER_SLOT_NAME, 0.5)?
                 .texture(
                     DEFAULT_LIT_SHADER_COLOR_TEXTURE_SLOT_NAME,
                     default_color_texture_handle,

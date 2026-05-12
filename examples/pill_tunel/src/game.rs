@@ -5,7 +5,7 @@ use pill_engine::{define_component, game::*};
 // Camera
 const CAMERA_POSITION_Z: f32 = 0.0;
 const CAMERA_FOV: f32 = 60.0;
-const CLEAR_COLOR: (f32, f32, f32) = (0.3, 0.12, 0.20);
+const CLEAR_COLOR: (f32, f32, f32) = (0.02, 0.02, 0.12);
 // exp(-density²·distance²). Half-blend at d=20 → visible haze pulls in close
 // and the back half of the tunnel vanishes into bg:
 //   d=10 (hero) → 16%, d=20 → 50%, d=40 → 94%, d=80 (far) → 100%.
@@ -105,6 +105,7 @@ fn tinted_pill_material(
     engine: &mut Engine,
     name: &str,
     tint: (f32, f32, f32),
+    specularity: f32,
     color_tex: TextureHandle,
     normal_tex: TextureHandle,
 ) -> Result<MaterialHandle> {
@@ -113,6 +114,7 @@ fn tinted_pill_material(
             .texture("color", color_tex)?
             .texture("normal", normal_tex)?
             .color_parameter("tint", Color::new(tint.0, tint.1, tint.2))?
+            .scalar_parameter("spec", specularity)?
             .build(),
     )
 }
@@ -205,12 +207,12 @@ impl PillGame for WebGame {
         let color_tex = engine.add_resource::<Texture>(Texture::from_bytes(
             "pill_color",
             TextureType::Color,
-            include_bytes!("../res/textures/pill_color.png"),
+            include_bytes!("../res/textures/generated/pill_color.png"),
         ))?;
         let normal_tex = engine.add_resource::<Texture>(Texture::from_bytes(
             "pill_normal",
             TextureType::Normal,
-            include_bytes!("../res/textures/pill_normal.png"),
+            include_bytes!("../res/textures/generated/pill_normal.png"),
         ))?;
 
         let tunnel_materials: Vec<MaterialHandle> = PALETTE
@@ -221,13 +223,14 @@ impl PillGame for WebGame {
                     engine,
                     &format!("tunnel_material_{i}"),
                     *tint,
+                    0.5,
                     color_tex,
                     normal_tex,
                 )
             })
             .collect::<Result<_>>()?;
         let hero_material =
-            tinted_pill_material(engine, "hero_material", HERO_TINT, color_tex, normal_tex)?;
+            tinted_pill_material(engine, "hero_material", HERO_TINT, 0.9, color_tex, normal_tex)?;
 
         // Camera
         engine

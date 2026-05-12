@@ -169,9 +169,8 @@ impl Resource for Shader {
             &engine.game_resources_directory_path,
             "fragment",
         )?;
-        let vertex_wgsl = std::str::from_utf8(&vertex_bytes).with_context(|| {
-            format!("Vertex shader for {} is not valid UTF-8 WGSL", &self.name)
-        })?;
+        let vertex_wgsl = std::str::from_utf8(&vertex_bytes)
+            .with_context(|| format!("Vertex shader for {} is not valid UTF-8 WGSL", &self.name))?;
         let fragment_wgsl = std::str::from_utf8(&fragment_bytes).with_context(|| {
             format!("Fragment shader for {} is not valid UTF-8 WGSL", &self.name)
         })?;

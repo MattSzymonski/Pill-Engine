@@ -7,6 +7,7 @@
 struct EngineParams {
     float3 fog_color;
     float  fog_density;
+    float  delta_time;
 };
 [[vk::binding(0, 0)]] ConstantBuffer<EngineParams> engine;
 
