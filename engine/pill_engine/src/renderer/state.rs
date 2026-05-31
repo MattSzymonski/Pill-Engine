@@ -162,6 +162,7 @@ impl PillRenderer for Renderer {
 
         let mut passes = std::mem::take(&mut self.state.passes);
         for pass in &mut passes {
+            timer.record(pass.get_label());
             pass.draw(&mut encoder, self, &frame, &swapchain_view, &world)?;
         }
         self.state.passes = passes;

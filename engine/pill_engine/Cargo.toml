@@ -33,7 +33,7 @@ web-time = "1.1"
 # Optional deps activated by feature flags
 egui = { version = "0.32.1", optional = true }
 egui-wgpu = { version = "0.32.1", features = ["winit"], optional = true }
-egui-winit = { version = "0.32.1", default-features = false, optional = true }
+egui-winit = { version = "0.32.1", default-features = false, features = ["clipboard"], optional = true }
 
 # Native-only dependencies (not available on WASM)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

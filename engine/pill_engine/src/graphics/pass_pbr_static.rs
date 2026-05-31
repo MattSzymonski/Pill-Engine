@@ -81,12 +81,9 @@ pub(crate) struct PerDrawStd140 {
 unsafe impl bytemuck::Zeroable for PerDrawStd140 {}
 unsafe impl bytemuck::Pod for PerDrawStd140 {}
 
-// Preallocated dynamic-UBO ring: 256-byte stride to satisfy min UBO offset alignment.
+// Per-draw storage buffer: tightly packed, indexed by instance_index in the shader.
 const MAX_EXPECTED_PER_DRAW_INSTANCES: usize = 100_000;
-const UNIFORM_OFFSET_ALIGNMENT: usize = 256;
-const PER_DRAW_STRIDE_BYTES: usize = std::mem::size_of::<PerDrawStd140>()
-    .div_ceil(UNIFORM_OFFSET_ALIGNMENT)
-    * UNIFORM_OFFSET_ALIGNMENT;
+const PER_DRAW_STRIDE_BYTES: usize = std::mem::size_of::<PerDrawStd140>();
 
 pub const MATERIAL_BIND_GROUP_GLOBALS: usize = 0;
 pub const MATERIAL_BIND_GROUP_TEXTURES: usize = 1;
@@ -372,17 +369,14 @@ impl Pass for PassPBRStatic {
                 },
                 count: None,
             }],
-            // 3: per-draw dynamic UBO (MVP + model)
+            // 3: per-draw storage array (MVP + model), indexed by instance_index
             vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: Some(
-                        std::num::NonZeroU64::new(std::mem::size_of::<PerDrawStd140>() as u64)
-                            .unwrap(),
-                    ),
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
                 count: None,
             }],
@@ -439,9 +433,9 @@ impl Pass for PassPBRStatic {
         };
 
         let per_draw_buffer = renderer.create_buffer(BufferDesc {
-            label: Some("pass_pbr_static_per_draw_ring"),
+            label: Some("pass_pbr_static_per_draw"),
             byte_size: (PER_DRAW_STRIDE_BYTES * MAX_EXPECTED_PER_DRAW_INSTANCES) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         })?;
         let per_draw_bind_group = {
             let layout = &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_PERDRAW];
@@ -451,14 +445,7 @@ impl Pass for PassPBRStatic {
                 layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &per_draw_buffer,
-                        offset: 0,
-                        size: Some(
-                            std::num::NonZeroU64::new(std::mem::size_of::<PerDrawStd140>() as u64)
-                                .unwrap(),
-                        ),
-                    }),
+                    resource: per_draw_buffer.as_entire_binding(),
                 }],
             })
         };
@@ -854,17 +841,16 @@ impl Pass for PassPBRStatic {
                 MAX_EXPECTED_PER_DRAW_INSTANCES
             );
         }
+        // Tightly pack all per-draw entries; no alignment padding needed for storage buffers.
         self.staging_buffer.clear();
-        let mut next_offset_u32: u32 = 0;
+        let mut next_instance: u32 = 0;
         for group in self.groups_buffer.iter_mut() {
             for batch in group.batches.iter_mut() {
-                batch.base_offset_u32 = next_offset_u32;
+                batch.base_offset_u32 = next_instance; // first instance index for this batch
                 for per_draw in &batch.instances {
                     self.staging_buffer
                         .extend_from_slice(bytemuck::bytes_of(per_draw));
-                    let pad = (PER_DRAW_STRIDE_BYTES) - std::mem::size_of::<PerDrawStd140>();
-                    self.staging_buffer.extend(std::iter::repeat_n(0u8, pad));
-                    next_offset_u32 = next_offset_u32.wrapping_add(PER_DRAW_STRIDE_BYTES as u32);
+                    next_instance = next_instance.wrapping_add(1);
                 }
             }
         }
@@ -908,12 +894,18 @@ impl Pass for PassPBRStatic {
             occlusion_query_set: None,
         });
 
-        // Record draw commands: bind pipeline → globals → material → per-draw per instance.
+        // Record draw commands: pipeline → per-draw storage (once) → per group: globals + material → per batch: instanced draw.
         let state_ref = self
             .state
             .as_ref()
             .expect("PassPBRStatic: state not initialized — call init() before draw()");
         render_pass.set_pipeline(&state_ref.pipeline.pipeline);
+        // Bind per-draw storage array once — instance_index selects the right entry per vertex.
+        render_pass.set_bind_group(
+            MATERIAL_BIND_GROUP_PERDRAW as u32,
+            &state_ref.per_draw_bind_group,
+            &[],
+        );
         for group in &self.groups_buffer {
             render_pass.set_bind_group(
                 MATERIAL_BIND_GROUP_GLOBALS as u32,
@@ -944,17 +936,10 @@ impl Pass for PassPBRStatic {
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                for instance_index in 0..batch.instances.len() {
-                    let offset = batch
-                        .base_offset_u32
-                        .wrapping_add((instance_index as u32) * (PER_DRAW_STRIDE_BYTES as u32));
-                    render_pass.set_bind_group(
-                        MATERIAL_BIND_GROUP_PERDRAW as u32,
-                        &state_ref.per_draw_bind_group,
-                        &[offset],
-                    );
-                    render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                }
+                let first = batch.base_offset_u32;
+                let count = batch.instances.len() as u32;
+                // One instanced draw per batch: instance_index in [first, first+count) selects per-draw data.
+                render_pass.draw_indexed(0..mesh.index_count, 0, first..(first + count));
             }
         }
 

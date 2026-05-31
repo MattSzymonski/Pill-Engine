@@ -175,7 +175,8 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
     );
     match render_result {
         Ok(_) => {
-            timer.end_context()?;
+            timer.end_context()?; // end "Render"
+            timer.end_context()?; // end "rendering_system update"
             engine.system_manager.update_system_timer(
                 RENDERING_SYSTEM.name,
                 RENDERING_SYSTEM.update_phase,
@@ -185,7 +186,8 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
         }
         Err(error) => match error.downcast_ref::<RendererError>() {
             Some(RendererError::SurfaceLost) => {
-                timer.end_context()?;
+                timer.end_context()?; // end "Render"
+                timer.end_context()?; // end "rendering_system update"
                 engine.system_manager.update_system_timer(
                     RENDERING_SYSTEM.name,
                     RENDERING_SYSTEM.update_phase,

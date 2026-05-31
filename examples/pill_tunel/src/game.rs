@@ -19,7 +19,7 @@ const CAMERA_DRIFT_AMPLITUDE: (f32, f32) = (0.35, 0.25);
 // Particle tunnel — N pills streaming forward through a donut-shaped emitter.
 // Camera looks down +Z; pills start spread uniformly along Z so steady-state
 // density is reached on frame 1. Each pill wraps back to far when it crosses near.
-const PILL_COUNT: usize = 1440;
+const PILL_COUNT: usize = 60000;
 const EMITTER_RADIUS_MIN: f32 = 6.0;
 const EMITTER_RADIUS_MAX: f32 = 13.0;
 const TUNNEL_NEAR_Z: f32 = -3.0;
@@ -190,7 +190,8 @@ impl PillGame for WebGame {
         let active_scene = engine.create_scene("default")?;
         engine.set_active_scene(active_scene)?;
 
-        let zero_ibl = engine.create_gpu_texture_f32("zero_ibl", &[0.0_f32, 0.0, 0.0, 0.0], 1, 1)?;
+        let zero_ibl =
+            engine.create_gpu_texture_f32("zero_ibl", &[0.0_f32, 0.0, 0.0, 0.0], 1, 1)?;
         {
             let rs = engine.get_global_component_mut::<RenderStateComponent>()?;
             rs.bg_color = [CLEAR_COLOR.0, CLEAR_COLOR.1, CLEAR_COLOR.2];

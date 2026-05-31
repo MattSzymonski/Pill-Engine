@@ -15,6 +15,33 @@ use pill_core::{PillTypeMapKey, Timer, TimerRecord};
 
 use pill_core::{ErrorContext, Result};
 
+fn format_record(buf: &mut String, record: &TimerRecord, depth: usize) {
+    buf.push_str(&format!(
+        "{}{:.3} ms  {}\n",
+        "  ".repeat(depth),
+        record.duration,
+        record.label
+    ));
+    for sub in &record.subrecords {
+        format_record(buf, sub, depth + 1);
+    }
+}
+
+fn format_timers(system_timers: &[(UpdatePhase, Vec<(String, Timer)>)]) -> String {
+    let mut buf = String::new();
+    for (phase, timers) in system_timers {
+        let total: f32 = timers.iter().map(|(_, t)| t.total_duration()).sum();
+        buf.push_str(&format!("Phase: {}  {:.3} ms\n", phase, total));
+        for (name, timer) in timers {
+            buf.push_str(&format!("  {}\n", name));
+            for record in &timer.records {
+                format_record(&mut buf, record, 2);
+            }
+        }
+    }
+    buf
+}
+
 pub struct EguiComponent {
     pub egui_client: Arc<EguiClient>,
     collapsing_state: HashMap<String, bool>,
@@ -113,10 +140,15 @@ impl EguiComponent {
                             )));
                             ui.add(egui::Label::new(format!("Entities: {}", entity_count)));
                             ui.separator();
-                            ui.add(egui::Label::new(format!(
-                                "Systems: {}, Total delta time: {:.3} ms",
-                                system_count, total_systems_delta_time
-                            )));
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Label::new(format!(
+                                    "Systems: {}, Total delta time: {:.3} ms",
+                                    system_count, total_systems_delta_time
+                                )));
+                                if ui.small_button("[C]").clicked() {
+                                    ui.ctx().copy_text(format_timers(&system_timers));
+                                }
+                            });
                             let mut phase_state = HashMap::new();
                             for (update_phase, system_timers) in system_timers.iter() {
                                 let phase_duration = system_timers
