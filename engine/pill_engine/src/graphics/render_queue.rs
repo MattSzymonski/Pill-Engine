@@ -15,9 +15,15 @@ use std::cmp::Ordering;
 
 // --- Render queue item ---
 
+#[derive(Clone, Copy)]
 pub struct RenderQueueItem {
     pub key: RenderQueueKey,
     pub entity_index: u32,
+    /// Raw transform copied (no trig) during the cache-warm sequential ECS scan;
+    /// the vertex shader builds the model matrix on the GPU. xyz used, w padding. [Aaltonen GDC 2023]
+    pub position: [f32; 4],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 4],
 }
 
 impl Ord for RenderQueueItem {

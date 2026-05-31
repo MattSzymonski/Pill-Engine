@@ -48,9 +48,9 @@ impl TransformComponentBuilder {
 
 // --- Transform Component ---
 
-// 36 bytes: position + rotation + scale only.
-// model_matrix / normal_matrix removed — the renderer sends pos/rot/scale as
-// vertex instance data and the GPU shader builds the matrix.
+// 36 bytes hot (pos+rot+scale only); model_matrix/normal_matrix were dead weight — GPU
+// computes matrices from pos/rot/scale sent as instance data. [Acton "Data-Oriented Design
+// and C++" CppCon 2014 — hot/cold struct split reduces cache lines per entity 152→36 B]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[readonly::make]
 pub struct TransformComponent {

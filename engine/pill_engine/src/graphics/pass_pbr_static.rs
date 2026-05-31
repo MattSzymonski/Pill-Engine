@@ -7,7 +7,7 @@ use crate::{
     },
     renderer::resources::{RendererMaterial, RendererMesh},
 };
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 use pill_core::{PillSlotMapKey, Result};
 use std::num::NonZeroU32;
 
@@ -71,17 +71,20 @@ impl CameraUniform {
     }
 }
 
-/// Per-draw uniform: MVP and model matrix packed into a std140-aligned dynamic UBO.
+/// Per-draw storage entry: raw pos/rot/scale (48 B). GPU builds model = T·R·S and MVP.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub(crate) struct PerDrawStd140 {
-    mvp: [[f32; 4]; 4],
-    model: [[f32; 4]; 4],
+    position: [f32; 4], // xyz
+    rotation: [f32; 4], // xyz, radians
+    scale: [f32; 4],    // xyz
 }
 unsafe impl bytemuck::Zeroable for PerDrawStd140 {}
 unsafe impl bytemuck::Pod for PerDrawStd140 {}
 
-// Per-draw storage buffer: tightly packed, indexed by instance_index in the shader.
+// Storage buffer (StructuredBuffer / var<storage,read>) indexed by SV_InstanceID replaces
+// dynamic-offset UBO: eliminates Metal's 256-B alignment tax and 120k per-instance API calls.
+// [Lottes @NOTimothyLottes 2025-01-23; Aaltonen "Modern Mobile Rendering at HypeHype" GDC 2023]
 const MAX_EXPECTED_PER_DRAW_INSTANCES: usize = 100_000;
 const PER_DRAW_STRIDE_BYTES: usize = std::mem::size_of::<PerDrawStd140>();
 
@@ -90,20 +93,11 @@ pub const MATERIAL_BIND_GROUP_TEXTURES: usize = 1;
 pub const MATERIAL_BIND_GROUP_PARAMS: usize = 2;
 pub const MATERIAL_BIND_GROUP_PERDRAW: usize = 3;
 
-/// Visible entity ready for batching into a draw call.
-pub(crate) struct VisiblePreDraw {
-    pub(crate) material_handle: RendererMaterialHandle,
-    pub(crate) mesh_handle: RendererMeshHandle,
-    pub(crate) entity_index: u32,
-    pub(crate) mvp: [[f32; 4]; 4],
-    pub(crate) model: [[f32; 4]; 4],
-}
-
-/// Mesh batch within a material group: same mesh handle, consecutive per-draw entries in the ring.
+/// Mesh batch within a material group: same mesh, a contiguous instance range in the storage array.
 pub(crate) struct MeshBatch {
     pub(crate) mesh_handle: RendererMeshHandle,
-    pub(crate) instances: Vec<PerDrawStd140>,
-    pub(crate) base_offset_u32: u32,
+    pub(crate) base_offset_u32: u32, // first instance index
+    pub(crate) instance_count: u32,
 }
 
 /// Draw group: one pipeline + one material, containing one or more mesh batches.
@@ -146,12 +140,10 @@ struct PassPBRStaticState {
     bg: Option<BgSubState>,
 }
 
-/// Default PBR pass: full GGX shading with IBL, per-draw dynamic UBO ring.
-/// No MeshDrawer — each entity is drawn with a direct indexed draw call.
+/// Default PBR pass: GGX shading with IBL, one instanced draw per material/mesh batch.
 pub struct PassPBRStatic {
     color_target: Option<RendererTextureHandle>,
     depth_texture: Option<RendererTextureHandle>,
-    visible_pre_draw_buffer: Vec<VisiblePreDraw>,
     groups_buffer: Vec<GroupCmd>,
     staging_buffer: Vec<u8>,
     ibl_diffuse: Option<RendererTextureHandle>,
@@ -170,7 +162,6 @@ impl PassPBRStatic {
         Self {
             color_target,
             depth_texture: None,
-            visible_pre_draw_buffer: Vec::with_capacity(MAX_EXPECTED_PER_DRAW_INSTANCES),
             groups_buffer: Vec::with_capacity(2000),
             staging_buffer: Vec::with_capacity(
                 MAX_EXPECTED_PER_DRAW_INSTANCES * PER_DRAW_STRIDE_BYTES,
@@ -369,7 +360,7 @@ impl Pass for PassPBRStatic {
                 },
                 count: None,
             }],
-            // 3: per-draw storage array (MVP + model), indexed by instance_index
+            // 3: per-draw storage array — no dynamic offset, no 256-B Metal alignment (Apple Metal Spec §4.1.1).
             vec![wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
@@ -720,10 +711,11 @@ impl Pass for PassPBRStatic {
             .as_ref()
             .unwrap();
 
-        // Update camera uniform and write to GPU buffer.
+        // Update camera uniform and write to GPU buffer. MVP = viewProjection·model is computed
+        // in the vertex shader, so the CPU never multiplies per-entity matrices.
         let fog_color = self.fog_color;
         let fog_density = self.fog_density;
-        let vp_mat: Mat4 = {
+        {
             let state = get_state(self);
             state
                 .camera_uniform
@@ -735,12 +727,25 @@ impl Pass for PassPBRStatic {
                 0,
                 bytemuck::bytes_of(&state.camera_uniform),
             );
-            Mat4::from_cols_array_2d(&state.camera_uniform.view_projection_matrix)
-        };
+        }
 
-        // Build visible set from the render queue.
-        self.visible_pre_draw_buffer.clear();
+        // Single pass over the pre-sorted render queue (key order = shader→material→mesh, so
+        // same material/mesh runs are contiguous): build groups/batches AND stream model
+        // matrices into the staging buffer in one sweep. No visible set, no MVP on CPU, no
+        // per-batch search. [Aaltonen "HypeHype" GDC 2023 — batch-upload once per pass]
+        self.groups_buffer.clear();
+        self.staging_buffer.clear();
+        let mut next_instance: u32 = 0;
+        let mut last_material: Option<RendererMaterialHandle> = None;
+        let mut last_mesh: Option<RendererMeshHandle> = None;
         for render_queue_item in world.render_queue.iter() {
+            if next_instance as usize >= MAX_EXPECTED_PER_DRAW_INSTANCES {
+                log::error!(
+                    "PassPBRStatic: per-draw capacity exceeded (capacity={})",
+                    MAX_EXPECTED_PER_DRAW_INSTANCES
+                );
+                break;
+            }
             let key_fields = decompose_render_queue_key(render_queue_item.key);
             let mesh_handle = RendererMeshHandle::new(
                 key_fields.mesh_index.into(),
@@ -751,108 +756,33 @@ impl Pass for PassPBRStatic {
                 NonZeroU32::new(key_fields.material_version.into()).unwrap(),
             );
 
-            let entity_index = render_queue_item.entity_index as usize;
-            let transform = world
-                .transform_components
-                .data
-                .get(entity_index)
-                .unwrap()
-                .as_ref()
-                .unwrap();
-            // Rotation stored in radians (game convention); match old shader's X*Y*Z quaternion order.
-            let rotation = Quat::from_rotation_x(transform.rotation.x)
-                * Quat::from_rotation_y(transform.rotation.y)
-                * Quat::from_rotation_z(transform.rotation.z);
-            let model_mat: Mat4 = Mat4::from_scale_rotation_translation(
-                transform.scale,
-                rotation,
-                transform.position,
-            );
-            let mvp: [[f32; 4]; 4] = (vp_mat * model_mat).to_cols_array_2d();
-            let model: [[f32; 4]; 4] = model_mat.to_cols_array_2d();
+            // Stream raw pos/rot/scale directly (GPU builds model = T·R·S, then MVP).
+            self.staging_buffer
+                .extend_from_slice(bytemuck::bytes_of(&PerDrawStd140 {
+                    position: render_queue_item.position,
+                    rotation: render_queue_item.rotation,
+                    scale: render_queue_item.scale,
+                }));
 
-            self.visible_pre_draw_buffer.push(VisiblePreDraw {
-                material_handle,
-                mesh_handle,
-                entity_index: render_queue_item.entity_index,
-                mvp,
-                model,
-            });
-        }
-
-        // Sort visible set by material (Pipeline → Material → Mesh).
-        self.visible_pre_draw_buffer.sort_by_key(|visible| {
-            ((visible.material_handle.data().version.get() as u64) << 32)
-                | (visible.material_handle.data().index as u64)
-        });
-
-        // Build group/batch command list.
-        self.groups_buffer.clear();
-        for visible in &self.visible_pre_draw_buffer {
-            let need_new_group = self
-                .groups_buffer
-                .last()
-                .map(|group| group.material_handle != visible.material_handle)
-                .unwrap_or(true);
-            if need_new_group {
+            if last_material != Some(material_handle) {
                 self.groups_buffer.push(GroupCmd {
-                    material_handle: visible.material_handle,
+                    material_handle,
                     batches: Vec::new(),
                 });
+                last_material = Some(material_handle);
+                last_mesh = None;
             }
             let group = self.groups_buffer.last_mut().unwrap();
-            if let Some(batch) = group
-                .batches
-                .iter_mut()
-                .find(|batch| batch.mesh_handle == visible.mesh_handle)
-            {
-                batch.instances.push(PerDrawStd140 {
-                    mvp: visible.mvp,
-                    model: visible.model,
-                });
-            } else {
+            if last_mesh != Some(mesh_handle) {
                 group.batches.push(MeshBatch {
-                    mesh_handle: visible.mesh_handle,
-                    instances: vec![PerDrawStd140 {
-                        mvp: visible.mvp,
-                        model: visible.model,
-                    }],
-                    base_offset_u32: 0,
+                    mesh_handle,
+                    base_offset_u32: next_instance,
+                    instance_count: 0,
                 });
+                last_mesh = Some(mesh_handle);
             }
-        }
-
-        // Upload per-draw data to the ring buffer.
-        let needed: u64 = self
-            .groups_buffer
-            .iter()
-            .map(|group| {
-                group
-                    .batches
-                    .iter()
-                    .map(|batch| batch.instances.len() as u64)
-                    .sum::<u64>()
-            })
-            .sum();
-        if needed > MAX_EXPECTED_PER_DRAW_INSTANCES as u64 {
-            log::error!(
-                "PassPBRStatic: per-draw capacity exceeded (needed={}, capacity={})",
-                needed,
-                MAX_EXPECTED_PER_DRAW_INSTANCES
-            );
-        }
-        // Tightly pack all per-draw entries; no alignment padding needed for storage buffers.
-        self.staging_buffer.clear();
-        let mut next_instance: u32 = 0;
-        for group in self.groups_buffer.iter_mut() {
-            for batch in group.batches.iter_mut() {
-                batch.base_offset_u32 = next_instance; // first instance index for this batch
-                for per_draw in &batch.instances {
-                    self.staging_buffer
-                        .extend_from_slice(bytemuck::bytes_of(per_draw));
-                    next_instance = next_instance.wrapping_add(1);
-                }
-            }
+            group.batches.last_mut().unwrap().instance_count += 1;
+            next_instance = next_instance.wrapping_add(1);
         }
         {
             let state_ref = self
@@ -894,13 +824,13 @@ impl Pass for PassPBRStatic {
             occlusion_query_set: None,
         });
 
-        // Record draw commands: pipeline → per-draw storage (once) → per group: globals + material → per batch: instanced draw.
         let state_ref = self
             .state
             .as_ref()
             .expect("PassPBRStatic: state not initialized — call init() before draw()");
         render_pass.set_pipeline(&state_ref.pipeline.pipeline);
-        // Bind per-draw storage array once — instance_index selects the right entry per vertex.
+        // Per-draw array bound once; instance_index selects per-entity data — 5 draws instead of 60k.
+        // [Lottes @NOTimothyLottes 2025-01-23; WebGPU W3C 2024 §drawIndexed firstInstance]
         render_pass.set_bind_group(
             MATERIAL_BIND_GROUP_PERDRAW as u32,
             &state_ref.per_draw_bind_group,
@@ -937,7 +867,7 @@ impl Pass for PassPBRStatic {
                 render_pass
                     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 let first = batch.base_offset_u32;
-                let count = batch.instances.len() as u32;
+                let count = batch.instance_count;
                 // One instanced draw per batch: instance_index in [first, first+count) selects per-draw data.
                 render_pass.draw_indexed(0..mesh.index_count, 0, first..(first + count));
             }

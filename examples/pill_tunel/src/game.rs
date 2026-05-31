@@ -130,6 +130,19 @@ pub struct WebGame {}
 
 // --- Systems -----------------------------------------------------------------
 
+/// Fast sine approximation (~0.1% error) — replaces std `sin` in the 60k-pill hot loop, where the
+/// transcendental dominated per-pill cost. Parabola fit + one refinement pass; range-reduced to
+/// [-π, π]. [Nick, "A Fast, Compact Approximation of the Sine Function", devmaster.net 2006;
+/// cf. Bhāskara I's sine approximation, 7th c.]
+fn fast_sin(mut x: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    x -= TAU * (x * (1.0 / TAU)).round(); // range-reduce to [-π, π]
+    const B: f32 = 4.0 / PI;
+    const C: f32 = -4.0 / (PI * PI);
+    let y = B * x + C * x * x.abs();
+    0.225 * (y * y.abs() - y) + y // refinement: ~1% → ~0.1% error
+}
+
 fn pill_particle_system(engine: &mut Engine) -> Result<()> {
     let dt = engine.get_global_component::<TimeComponent>()?.delta_time;
     let tunnel_length = TUNNEL_FAR_Z - TUNNEL_NEAR_Z;
@@ -141,7 +154,7 @@ fn pill_particle_system(engine: &mut Engine) -> Result<()> {
         while z < TUNNEL_NEAR_Z {
             z += tunnel_length;
         }
-        let y_wobble = (z * PILL_WOBBLE_Z_K + pill.wobble_phase).sin() * PILL_WOBBLE_AMPLITUDE;
+        let y_wobble = fast_sin(z * PILL_WOBBLE_Z_K + pill.wobble_phase) * PILL_WOBBLE_AMPLITUDE;
         transform.set_position(Vector3f::new(
             transform.position.x,
             pill.base_y + y_wobble,

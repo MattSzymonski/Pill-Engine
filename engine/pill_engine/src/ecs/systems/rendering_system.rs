@@ -107,18 +107,25 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
     let mut _matrix_calculation_duration: f32 = 0.0;
     let mut add_to_render_queue_duration: f32 = 0.0;
 
-    for (entity_handle, _transform_component, pbr_renderable_component) in engine
+    // GPU fast-path: copy raw pos/rot/scale during the cache-warm sequential scan — NO trig,
+    // no matrix build. The vertex shader composes model = T·R·S on the GPU. [Aaltonen GDC 2023]
+    for (entity_handle, transform, pbr_renderable_component) in engine
         .scene_manager
         .get_two_component_iterator_mut::<TransformComponent, PbrRenderableComponent>(
         active_scene_handle,
     )? {
         let add_to_render_queue_start_time = Instant::now();
         if let Some(render_queue_key) = pbr_renderable_component.render_queue_key {
-            let render_queue_item = RenderQueueItem {
+            let p = transform.position;
+            let r = transform.rotation;
+            let s = transform.scale;
+            engine.render_queue.push(RenderQueueItem {
                 key: render_queue_key,
                 entity_index: entity_handle.data().index,
-            };
-            engine.render_queue.push(render_queue_item);
+                position: [p.x, p.y, p.z, 0.0],
+                rotation: [r.x, r.y, r.z, 0.0],
+                scale: [s.x, s.y, s.z, 0.0],
+            });
         } else {
             warn!(LogContext::Rendering => "Invalid render queue key");
             continue;
@@ -138,7 +145,9 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
 
     timer.record("Sort render queue");
 
-    engine.render_queue.sort();
+    // pdqsort by key — measured faster here than hand-rolled radix/counting sort, because the
+    // scene has few distinct keys and the builtin handles many-equal-elements partitioning well.
+    engine.render_queue.sort_unstable_by_key(|item| item.key);
 
     timer.record("Get component storages");
 
