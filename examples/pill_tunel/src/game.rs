@@ -19,7 +19,7 @@ const CAMERA_DRIFT_AMPLITUDE: (f32, f32) = (0.35, 0.25);
 // Particle tunnel — N pills streaming forward through a donut-shaped emitter.
 // Camera looks down +Z; pills start spread uniformly along Z so steady-state
 // density is reached on frame 1. Each pill wraps back to far when it crosses near.
-const PILL_COUNT: usize = 60000;
+const PILL_COUNT: usize = 1440;
 const EMITTER_RADIUS_MIN: f32 = 6.0;
 const EMITTER_RADIUS_MAX: f32 = 13.0;
 const TUNNEL_NEAR_Z: f32 = -3.0;

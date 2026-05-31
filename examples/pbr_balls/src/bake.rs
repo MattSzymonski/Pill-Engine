@@ -15,8 +15,8 @@ const RIM_U: f32 = 0.60;
 const RIM_V: f32 = 0.25;
 const RIM_INTENSITY: [f32; 3] = [1.5, 2.5, 5.0]; // Reinhard → [0.60, 0.71, 0.83] cool blue
 
-const LIGHT_K: f32 = 8.0;                              // glare falloff exponent
-const KEY_SKY: [f32; 3] = [0.010, 0.060, 0.200];      // 0.2 * vec3(0.05, 0.3, 1.) — cool blue haze away from key
+const LIGHT_K: f32 = 8.0; // glare falloff exponent
+const KEY_SKY: [f32; 3] = [0.010, 0.060, 0.200]; // 0.2 * vec3(0.05, 0.3, 1.) — cool blue haze away from key
 
 /// Generates the studio equirect panorama as Rgba32Float pixels (512×256 linear HDR).
 pub fn generate() -> (Vec<f32>, u32, u32) {
@@ -57,11 +57,7 @@ pub fn generate() -> (Vec<f32>, u32, u32) {
 
 /// Bakes IBL maps from an Rgba32Float equirect panorama.
 /// Returns (diffuse 32×16, specular mips [128×64 → 8×4], brdf_lut 256×256), all Rgba32Float.
-pub fn bake_all(
-    equirect: &[f32],
-    width: u32,
-    height: u32,
-) -> (Vec<f32>, Vec<Vec<f32>>, Vec<f32>) {
+pub fn bake_all(equirect: &[f32], width: u32, height: u32) -> (Vec<f32>, Vec<Vec<f32>>, Vec<f32>) {
     let eq = Equirect {
         pixels: equirect.to_vec(),
         w: width,

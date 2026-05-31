@@ -30,6 +30,12 @@ impl RenderStateComponent {
     }
 }
 
+impl Default for RenderStateComponent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PillTypeMapKey for RenderStateComponent {
     type Storage = GlobalComponentStorage<RenderStateComponent>;
 }

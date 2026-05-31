@@ -6,7 +6,6 @@ use crate::{
 };
 
 use pill_core::{EngineError, RendererError, Timer};
-use wgpu;
 
 use pill_core::Result;
 

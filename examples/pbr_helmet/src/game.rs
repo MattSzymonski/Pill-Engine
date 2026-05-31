@@ -64,33 +64,33 @@ impl PillGame for Game {
         engine.register_component::<PbrRenderableComponent>(scene)?;
         engine.register_component::<OrbitCamera>(scene)?;
 
-        let mesh_handle = engine.add_resource(Mesh::new(
+        let mesh_handle = engine.add_resource(Mesh::from_cooked_mesh_bytes(
             "helmet_mesh",
-            "models/DamagedHelmet.cooked_mesh".into(),
-        ))?;
+            include_bytes!("../res/models/DamagedHelmet.cooked_mesh"),
+        )?)?;
 
-        let albedo_handle = engine.add_resource(Texture::new(
+        let albedo_handle = engine.add_resource(Texture::from_bytes(
             "helmet_albedo",
             TextureType::Color,
-            ResourceLoader::Path("models/DamagedHelmet_albedo.cooked_tex".into()),
+            include_bytes!("../res/models/DamagedHelmet_albedo.cooked_tex"),
         ))?;
 
-        let normal_handle = engine.add_resource(Texture::new(
+        let normal_handle = engine.add_resource(Texture::from_bytes(
             "helmet_normal",
             TextureType::Normal,
-            ResourceLoader::Path("models/DamagedHelmet_normal.cooked_tex".into()),
+            include_bytes!("../res/models/DamagedHelmet_normal.cooked_tex"),
         ))?;
 
-        let metallic_roughness_handle = engine.add_resource(Texture::new(
+        let metallic_roughness_handle = engine.add_resource(Texture::from_bytes(
             "helmet_metallic_roughness",
             TextureType::MetallicRoughness,
-            ResourceLoader::Path("models/DamagedHelmet_metallic_roughness.cooked_tex".into()),
+            include_bytes!("../res/models/DamagedHelmet_metallic_roughness.cooked_tex"),
         ))?;
 
-        let emissive_handle = engine.add_resource(Texture::new(
+        let emissive_handle = engine.add_resource(Texture::from_bytes(
             "helmet_emissive",
             TextureType::Emissive,
-            ResourceLoader::Path("models/DamagedHelmet_emissive.cooked_tex".into()),
+            include_bytes!("../res/models/DamagedHelmet_emissive.cooked_tex"),
         ))?;
 
         let material_handle = engine.add_resource(

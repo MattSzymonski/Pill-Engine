@@ -33,7 +33,7 @@ web-time = "1.1"
 # Optional deps activated by feature flags
 egui = { version = "0.32.1", optional = true }
 egui-wgpu = { version = "0.32.1", features = ["winit"], optional = true }
-egui-winit = { version = "0.32.1", default-features = false, features = ["clipboard"], optional = true }
+egui-winit = { version = "0.32.1", default-features = false, optional = true }
 
 # Native-only dependencies (not available on WASM)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -41,6 +41,8 @@ png = "0.17"
 rodio = { version = "0.20", features = ["wav", "mp3"] }
 gilrs = "0.11.0"
 pollster = "0.2"
+# clipboard pulls arboard, which has no wasm32 backend — desktop only (powers the egui [C] copy button)
+egui-winit = { version = "0.32.1", default-features = false, features = ["clipboard"], optional = true }
 
 
 [build-dependencies]

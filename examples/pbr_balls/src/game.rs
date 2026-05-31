@@ -17,7 +17,8 @@ impl PillGame for Game {
 
         let bg_h = engine.create_gpu_texture_f32("equirect", &eq, eq_w, eq_h)?;
         let diff_h = engine.create_gpu_texture_f32("diffuse_ibl", &diffuse, 32, 16)?;
-        let spec_h = engine.create_gpu_mipped_texture_f32("specular_ibl", &specular_mips, 128, 64)?;
+        let spec_h =
+            engine.create_gpu_mipped_texture_f32("specular_ibl", &specular_mips, 128, 64)?;
         let lut_h = engine.create_gpu_texture_f32("brdf_lut", &brdf_lut, 256, 256)?;
 
         let rs = engine.get_global_component_mut::<RenderStateComponent>()?;
@@ -36,21 +37,21 @@ impl PillGame for Game {
 
         engine.add_system("orbit_camera", orbit_camera_system)?;
 
-        let mesh_handle = engine.add_resource(Mesh::new(
+        let mesh_handle = engine.add_resource(Mesh::from_cooked_mesh_bytes(
             "spheres_mesh",
-            "models/MetalRoughSpheres.cooked_mesh".into(),
-        ))?;
+            include_bytes!("../res/models/MetalRoughSpheres.cooked_mesh"),
+        )?)?;
 
-        let albedo_handle = engine.add_resource(Texture::new(
+        let albedo_handle = engine.add_resource(Texture::from_bytes(
             "spheres_albedo",
             TextureType::Color,
-            ResourceLoader::Path("models/MetalRoughSpheres_albedo.cooked_tex".into()),
+            include_bytes!("../res/models/MetalRoughSpheres_albedo.cooked_tex"),
         ))?;
 
-        let mr_handle = engine.add_resource(Texture::new(
+        let mr_handle = engine.add_resource(Texture::from_bytes(
             "spheres_mr",
             TextureType::MetallicRoughness,
-            ResourceLoader::Path("models/MetalRoughSpheres_metallic_roughness.cooked_tex".into()),
+            include_bytes!("../res/models/MetalRoughSpheres_metallic_roughness.cooked_tex"),
         ))?;
 
         let mat_handle = engine.add_resource(
