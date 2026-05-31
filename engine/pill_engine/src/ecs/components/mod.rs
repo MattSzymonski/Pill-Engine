@@ -27,4 +27,4 @@ pub(crate) mod transform_component;
 
 pub use component::{Component, ComponentDestroyer, ConcreteComponentDestroyer, GlobalComponent};
 
-pub use component_storage::{ComponentStorage, GlobalComponentStorage};
+pub use component_storage::{get_global_component_from, ComponentStorage, GlobalComponentStorage};

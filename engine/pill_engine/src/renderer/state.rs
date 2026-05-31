@@ -113,6 +113,7 @@ impl PillRenderer for Renderer {
         &mut self,
         active_camera_entity_handle: EntityHandle,
         scene: &crate::ecs::Scene,
+        globals: &pill_core::PillTypeMap,
         delta_time: f32,
         timer: &mut Timer,
         resource_manager: &ResourceManager,
@@ -147,6 +148,7 @@ impl PillRenderer for Renderer {
         let world = WorldQuery::new(
             active_camera_entity_handle,
             scene,
+            globals,
             delta_time,
             resource_manager,
         );

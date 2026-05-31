@@ -3,6 +3,7 @@ target/
 build/
 .vscode/
 *.lock
+.claude
 
 docs/*
 engine/pill_engine/docs/uml_out/*
@@ -15,4 +16,4 @@ engine/target_*
 *.cooked_tex
 DamagedHelmet.glb
 MetalRoughSpheres.glb
-.claude
+studio_small_08.hdr

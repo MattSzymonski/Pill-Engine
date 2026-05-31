@@ -57,6 +57,7 @@ impl PillRenderer for DummyRenderer {
         &mut self,
         _active_camera_entity_handle: EntityHandle,
         _scene: &Scene,
+        _globals: &pill_core::PillTypeMap,
         _delta_time: f32,
         _timer: &mut Timer,
         _resource_manager: &ResourceManager,

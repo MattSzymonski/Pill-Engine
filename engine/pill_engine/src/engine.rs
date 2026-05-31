@@ -1068,18 +1068,7 @@ impl Engine {
     where
         T: GlobalComponent<Storage = GlobalComponentStorage<T>>,
     {
-        // Get component
-        let component = self
-            .global_components
-            .get::<T>()
-            .ok_or_else(|| -> pill_core::PillError {
-                EngineError::GlobalComponentNotFound(get_type_name::<T>()).into()
-            })?
-            .data
-            .as_ref()
-            .unwrap();
-
-        Ok(component)
+        crate::ecs::get_global_component_from::<T>(&self.global_components)
     }
 
     /// Returns global mutable component

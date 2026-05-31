@@ -20,17 +20,8 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
         .boot_done;
 
     if !boot_done {
-        let (bg, diff, spec, lut, bg_color, fog_density) = {
-            let rs = engine.get_global_component::<RenderStateComponent>()?;
-            (
-                rs.background,
-                rs.ibl_diffuse,
-                rs.ibl_specular,
-                rs.ibl_brdf_lut,
-                rs.bg_color,
-                rs.fog_density,
-            )
-        };
+        // Bootstrap wires only GPU resources (render targets). Per-frame state (bg/IBL/fog) is read
+        // from RenderStateComponent each frame inside the passes via WorldQuery::get_global.
         let (w, h) = engine.renderer.get_surface_size();
         let hdr = engine.renderer.create_render_target(RendererTargetDesc {
             name: "hdr_target".to_string(),
@@ -40,12 +31,7 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
         })?;
         #[cfg_attr(not(feature = "ui"), allow(unused_mut))]
         let mut passes: Vec<Box<dyn crate::graphics::Pass>> = vec![
-            Box::new(
-                PassPBROpaque::new(Some(hdr))
-                    .with_background(bg, bg_color)
-                    .with_ibl(diff, spec, lut)
-                    .with_fog(bg_color, fog_density),
-            ),
+            Box::new(PassPBROpaque::new(Some(hdr))),
             Box::new(PassTonemap::new(hdr)),
         ];
         #[cfg(feature = "ui")]
@@ -94,14 +80,17 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
 
     timer.begin_context("Render");
 
-    // Stateless: the engine hands the active scene to the renderer; each pass queries the
-    // component types it needs via WorldQuery::query::<T>() and builds its own draw list.
+    // Stateless: the engine hands the active scene + globals to the renderer; each pass queries the
+    // per-entity components (WorldQuery::query::<T>()) and globals (WorldQuery::get_global::<T>())
+    // it needs, and builds its own draw list.
     let active_scene = engine.scene_manager.get_active_scene()?;
+    let globals = &engine.global_components;
     let delta_time = engine.frame_delta_time;
 
     let render_result = engine.renderer.render(
         active_camera_entity_handle,
         active_scene,
+        globals,
         delta_time,
         &mut timer,
         &engine.resource_manager,

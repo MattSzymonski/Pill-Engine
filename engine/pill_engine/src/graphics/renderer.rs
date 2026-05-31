@@ -3,11 +3,13 @@
 use crate::ecs::EguiClient;
 use crate::{
     app_config::EngineConfig,
-    ecs::{Component, ComponentStorage, EntityHandle, Scene},
+    ecs::{
+        Component, ComponentStorage, EntityHandle, GlobalComponent, GlobalComponentStorage, Scene,
+    },
     resources::{ResourceManager, ShaderParameterSlot, ShaderTextureSlot, TextureType},
 };
 
-use pill_core::Timer;
+use pill_core::{PillTypeMap, Timer};
 
 use pill_core::Result;
 use std::{collections::HashMap, sync::Arc};
@@ -44,12 +46,14 @@ pub struct WorldQuery<'a> {
     pub delta_time: f32,
     pub resources: &'a ResourceManager,
     scene: &'a Scene,
+    globals: &'a PillTypeMap,
 }
 
 impl<'a> WorldQuery<'a> {
     pub fn new(
         active_camera: EntityHandle,
         scene: &'a Scene,
+        globals: &'a PillTypeMap,
         delta_time: f32,
         resources: &'a ResourceManager,
     ) -> Self {
@@ -58,15 +62,24 @@ impl<'a> WorldQuery<'a> {
             delta_time,
             resources,
             scene,
+            globals,
         }
     }
 
-    /// Borrow the storage for component type `T` from the active scene.
+    /// Borrow the storage for per-entity component type `T` from the active scene.
     pub fn query<T>(&self) -> Result<&'a ComponentStorage<T>>
     where
         T: Component<Storage = ComponentStorage<T>>,
     {
         self.scene.get_component_storage::<T>()
+    }
+
+    /// Borrow a global component `T` (e.g. RenderStateComponent) from the world.
+    pub fn get_global<T>(&self) -> Result<&'a T>
+    where
+        T: GlobalComponent<Storage = GlobalComponentStorage<T>>,
+    {
+        crate::ecs::get_global_component_from::<T>(self.globals)
     }
 }
 
@@ -169,6 +182,7 @@ pub trait PillRenderer {
         &mut self,
         active_camera_entity_handle: EntityHandle,
         scene: &Scene,
+        globals: &PillTypeMap,
         delta_time: f32,
         timer: &mut Timer,
         resource_manager: &ResourceManager,

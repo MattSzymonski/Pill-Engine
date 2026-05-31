@@ -12,8 +12,8 @@ mod systems;
 // - Components
 
 pub use components::{
-    Component, ComponentDestroyer, ComponentStorage, ConcreteComponentDestroyer, GlobalComponent,
-    GlobalComponentStorage,
+    get_global_component_from, Component, ComponentDestroyer, ComponentStorage,
+    ConcreteComponentDestroyer, GlobalComponent, GlobalComponentStorage,
 };
 
 pub use components::camera_component::{

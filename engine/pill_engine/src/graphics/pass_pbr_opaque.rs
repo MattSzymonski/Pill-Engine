@@ -1,6 +1,11 @@
-use crate::config::{DEFAULT_BRDF_LUT_FALLBACK_PIXEL, DEFAULT_IBL_FALLBACK_PIXEL};
+use crate::config::{
+    DEFAULT_BRDF_LUT_FALLBACK_PIXEL, DEFAULT_EQUIRECT_FALLBACK_PIXEL, DEFAULT_IBL_FALLBACK_PIXEL,
+};
 use crate::{
-    ecs::{CameraComponent, ComponentStorage, PbrRenderableComponent, TransformComponent},
+    ecs::{
+        CameraComponent, ComponentStorage, PbrRenderableComponent, RenderStateComponent,
+        TransformComponent,
+    },
     graphics::{
         decompose_render_queue_key, BufferDesc, Pass, PillRenderer, PipelineV2, PipelineV2Desc,
         RendererMaterialHandle, RendererMeshHandle, RendererTextureHandle, ShaderDesc, WorldQuery,
@@ -126,7 +131,9 @@ struct BgSubState {
     pipeline: PipelineV2,
     camera_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    _sampler: wgpu::Sampler,
+    sampler: wgpu::Sampler,
+    // Equirect handle the current bind_group was built from; rebuild only when it changes.
+    cached_bg: RendererTextureHandle,
 }
 
 /// GPU-side pass state initialized in `Pass::init`, read every `Pass::draw`.
@@ -136,24 +143,99 @@ struct PassPBROpaqueState {
     globals_bind_group: wgpu::BindGroup,
     pipeline: PipelineV2,
     ibl_sampler: wgpu::Sampler,
+    prefilter_sampler: wgpu::Sampler,
     per_draw_buffer: wgpu::Buffer,
     per_draw_bind_group: wgpu::BindGroup,
-    bg: Option<BgSubState>,
+    bg: BgSubState,
+    // IBL handles the current globals_bind_group was built from; rebuild only when these change.
+    cached_ibl: [RendererTextureHandle; 3],
+}
+
+/// Builds the globals bind group (camera UBO + IBL irradiance/prefilter/BRDF-LUT views).
+/// Shared by init() and the per-frame rebuild-on-change path in draw().
+#[allow(clippy::too_many_arguments)]
+fn build_globals_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    camera_buffer: &wgpu::Buffer,
+    irradiance_view: &wgpu::TextureView,
+    prefilter_view: &wgpu::TextureView,
+    brdf_lut_view: &wgpu::TextureView,
+    ibl_sampler: &wgpu::Sampler,
+    prefilter_sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("pass_pbr_opaque_globals_bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(irradiance_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(ibl_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(prefilter_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(prefilter_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(brdf_lut_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::Sampler(ibl_sampler),
+            },
+        ],
+    })
+}
+
+/// Builds the background bind group (camera UBO + equirect view + sampler).
+fn build_bg_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    camera_buffer: &wgpu::Buffer,
+    equirect_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("pass_pbr_opaque_bg_bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(equirect_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 /// Default PBR pass: GGX shading with IBL, one instanced draw per material/mesh batch.
+/// Per-frame state (IBL handles, background equirect, bg_color, fog) is read from
+/// RenderStateComponent each frame via WorldQuery::get_global — nothing is baked at construction.
 pub struct PassPBROpaque {
     color_target: Option<RendererTextureHandle>,
     depth_texture: Option<RendererTextureHandle>,
     groups_buffer: Vec<GroupCmd>,
     staging_buffer: Vec<u8>,
-    ibl_diffuse: Option<RendererTextureHandle>,
-    ibl_specular: Option<RendererTextureHandle>,
-    ibl_brdf_lut: Option<RendererTextureHandle>,
-    fog_color: [f32; 3],
-    fog_density: f32,
-    bg_equirect: Option<RendererTextureHandle>,
-    bg_color: [f32; 3],
     state: Option<PassPBROpaqueState>,
 }
 
@@ -167,39 +249,8 @@ impl PassPBROpaque {
             staging_buffer: Vec::with_capacity(
                 MAX_EXPECTED_PER_DRAW_INSTANCES * PER_DRAW_STRIDE_BYTES,
             ),
-            ibl_diffuse: None,
-            ibl_specular: None,
-            ibl_brdf_lut: None,
-            fog_color: [1.0; 3],
-            fog_density: 0.0,
-            bg_equirect: None,
-            bg_color: [1.0; 3],
             state: None,
         }
-    }
-
-    pub fn with_ibl(
-        mut self,
-        diffuse: RendererTextureHandle,
-        specular: RendererTextureHandle,
-        brdf_lut: RendererTextureHandle,
-    ) -> Self {
-        self.ibl_diffuse = Some(diffuse);
-        self.ibl_specular = Some(specular);
-        self.ibl_brdf_lut = Some(brdf_lut);
-        self
-    }
-
-    pub fn with_fog(mut self, color: [f32; 3], density: f32) -> Self {
-        self.fog_color = color;
-        self.fog_density = density;
-        self
-    }
-
-    pub fn with_background(mut self, equirect: RendererTextureHandle, color: [f32; 3]) -> Self {
-        self.bg_equirect = Some(equirect);
-        self.bg_color = color;
-        self
     }
 }
 
@@ -457,42 +508,38 @@ impl Pass for PassPBROpaque {
 
         // Register 1px neutral-gray fallbacks for any missing IBL handle,
         // then get owned views (texture lifetime managed by renderer's pass_textures).
-        let irr_h = self.ibl_diffuse.unwrap_or_else(|| {
-            renderer.create_texture_from_pixels(
-                "diffuse_ibl_fallback",
-                &[DEFAULT_IBL_FALLBACK_PIXEL],
-                1,
-                1,
-                wgpu::TextureFormat::Rgba8Unorm,
-            )
-        });
-        let pre_h = self.ibl_specular.unwrap_or_else(|| {
-            renderer.create_texture_from_pixels(
-                "specular_ibl_fallback",
-                &[DEFAULT_IBL_FALLBACK_PIXEL],
-                1,
-                1,
-                wgpu::TextureFormat::Rgba8Unorm,
-            )
-        });
-        let lut_h = self.ibl_brdf_lut.unwrap_or_else(|| {
-            renderer.create_texture_from_pixels(
-                "brdf_lut_fallback",
-                &[DEFAULT_BRDF_LUT_FALLBACK_PIXEL],
-                1,
-                1,
-                wgpu::TextureFormat::Rgba8Unorm,
-            )
-        });
+        // Initial bind group is built from neutral fallbacks; draw() rebuilds it from
+        // RenderStateComponent's IBL handles the first frame (and whenever they change).
+        let irr_h = renderer.create_texture_from_pixels(
+            "diffuse_ibl_fallback",
+            &[DEFAULT_IBL_FALLBACK_PIXEL],
+            1,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let pre_h = renderer.create_texture_from_pixels(
+            "specular_ibl_fallback",
+            &[DEFAULT_IBL_FALLBACK_PIXEL],
+            1,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let lut_h = renderer.create_texture_from_pixels(
+            "brdf_lut_fallback",
+            &[DEFAULT_BRDF_LUT_FALLBACK_PIXEL],
+            1,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let irradiance_view = renderer
             .get_texture_view(irr_h)
-            .expect("ibl_diffuse handle invalid");
+            .expect("ibl_diffuse fallback invalid");
         let prefilter_view = renderer
             .get_texture_view(pre_h)
-            .expect("ibl_specular handle invalid");
+            .expect("ibl_specular fallback invalid");
         let brdf_lut_view = renderer
             .get_texture_view(lut_h)
-            .expect("ibl_brdf_lut handle invalid");
+            .expect("ibl_brdf_lut fallback invalid");
 
         let prefilter_sampler = {
             let device = renderer.get_device();
@@ -509,49 +556,24 @@ impl Pass for PassPBROpaque {
             })
         };
 
-        let globals_bind_group = {
-            let layout = &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_GLOBALS];
-            let device = renderer.get_device();
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pass_pbr_opaque_globals_bind_group"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: camera_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&irradiance_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&ibl_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&prefilter_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&prefilter_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&brdf_lut_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&ibl_sampler),
-                    },
-                ],
-            })
-        };
+        let globals_bind_group = build_globals_bind_group(
+            renderer.get_device(),
+            &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_GLOBALS],
+            &camera_buffer,
+            &irradiance_view,
+            &prefilter_view,
+            &brdf_lut_view,
+            &ibl_sampler,
+            &prefilter_sampler,
+        );
+        let cached_ibl = [irr_h, pre_h, lut_h];
 
         self.depth_texture = Some(renderer.create_depth_texture("pass_pbr_opaque_depth")?);
 
-        // Create background sub-draw state if an equirect handle was provided.
-        let bg = if let Some(equirect_h) = self.bg_equirect {
+        // Background sub-draw is always created; its equirect comes from RenderStateComponent.background
+        // each frame (draw() rebuilds the bind group when the handle changes). Initial bind group uses
+        // a 1px fallback equirect.
+        let bg = {
             let bg_vs = include_str!("../../res/shaders/background_vertex.wgsl");
             let bg_fs = include_str!("../../res/shaders/background_fragment.wgsl");
             let bg_bind_groups = vec![vec![
@@ -618,9 +640,16 @@ impl Pass for PassPBROpaque {
                     unclipped_depth: false,
                 },
             })?;
+            let equirect_fallback_h = renderer.create_texture_from_pixels(
+                "bg_equirect_fallback",
+                &[DEFAULT_EQUIRECT_FALLBACK_PIXEL],
+                1,
+                1,
+                wgpu::TextureFormat::Rgba32Float,
+            );
             let equirect_view = renderer
-                .get_texture_view(equirect_h)
-                .expect("bg equirect handle invalid");
+                .get_texture_view(equirect_fallback_h)
+                .expect("bg equirect fallback invalid");
             let bg_sampler = renderer
                 .get_device()
                 .create_sampler(&wgpu::SamplerDescriptor {
@@ -640,37 +669,20 @@ impl Pass for PassPBROpaque {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-            let bg_bind_group = {
-                let layout = &bg_pipeline.bind_group_layouts[0];
-                renderer
-                    .get_device()
-                    .create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("pass_pbr_opaque_bg_bind_group"),
-                        layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: bg_camera_buf.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(&equirect_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(&bg_sampler),
-                            },
-                        ],
-                    })
-            };
-            Some(BgSubState {
+            let bg_bind_group = build_bg_bind_group(
+                renderer.get_device(),
+                &bg_pipeline.bind_group_layouts[0],
+                &bg_camera_buf,
+                &equirect_view,
+                &bg_sampler,
+            );
+            BgSubState {
                 pipeline: bg_pipeline,
                 camera_buf: bg_camera_buf,
                 bind_group: bg_bind_group,
-                _sampler: bg_sampler,
-            })
-        } else {
-            None
+                sampler: bg_sampler,
+                cached_bg: equirect_fallback_h,
+            }
         };
 
         self.state = Some(PassPBROpaqueState {
@@ -679,9 +691,11 @@ impl Pass for PassPBROpaque {
             globals_bind_group,
             pipeline,
             ibl_sampler,
+            prefilter_sampler,
             per_draw_buffer,
             per_draw_bind_group,
             bg,
+            cached_ibl,
         });
 
         Ok(())
@@ -695,10 +709,64 @@ impl Pass for PassPBROpaque {
         view: &wgpu::TextureView,
         world: &WorldQuery<'_>,
     ) -> Result<()> {
-        // Query the component storages this pass needs.
+        // Query per-entity storages + the global render state (bg/IBL/fog) this pass needs.
         let camera_components = world.query::<CameraComponent>()?;
         let transform_components = world.query::<TransformComponent>()?;
         let pbr_renderable_components = world.query::<PbrRenderableComponent>()?;
+        let render_state = world.get_global::<RenderStateComponent>()?;
+
+        // Rebuild the IBL globals bind group only when the component's handles change (steady state: 0).
+        {
+            let ibl = [
+                render_state.ibl_diffuse,
+                render_state.ibl_specular,
+                render_state.ibl_brdf_lut,
+            ];
+            if get_state(self).cached_ibl != ibl {
+                let irradiance_view = renderer
+                    .get_texture_view(ibl[0])
+                    .expect("ibl_diffuse handle invalid");
+                let prefilter_view = renderer
+                    .get_texture_view(ibl[1])
+                    .expect("ibl_specular handle invalid");
+                let brdf_lut_view = renderer
+                    .get_texture_view(ibl[2])
+                    .expect("ibl_brdf_lut handle invalid");
+                let device = renderer.get_device();
+                let state = get_state(self);
+                state.globals_bind_group = build_globals_bind_group(
+                    device,
+                    &state.pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_GLOBALS],
+                    &state.camera_buffer,
+                    &irradiance_view,
+                    &prefilter_view,
+                    &brdf_lut_view,
+                    &state.ibl_sampler,
+                    &state.prefilter_sampler,
+                );
+                state.cached_ibl = ibl;
+            }
+        }
+
+        // Rebuild the background bind group only when the component's equirect handle changes.
+        {
+            let bg_h = render_state.background;
+            if get_state(self).bg.cached_bg != bg_h {
+                let equirect_view = renderer
+                    .get_texture_view(bg_h)
+                    .expect("background handle invalid");
+                let device = renderer.get_device();
+                let state = get_state(self);
+                state.bg.bind_group = build_bg_bind_group(
+                    device,
+                    &state.bg.pipeline.bind_group_layouts[0],
+                    &state.bg.camera_buf,
+                    &equirect_view,
+                    &state.bg.sampler,
+                );
+                state.bg.cached_bg = bg_h;
+            }
+        }
 
         // Read active camera and transform.
         let active_camera_index = world.active_camera.data().index as usize;
@@ -717,8 +785,9 @@ impl Pass for PassPBROpaque {
 
         // Update camera uniform and write to GPU buffer. MVP = viewProjection·model is computed
         // in the vertex shader, so the CPU never multiplies per-entity matrices.
-        let fog_color = self.fog_color;
-        let fog_density = self.fog_density;
+        // Fog fades to the background color (no separate fog_color); read from the component.
+        let fog_color = render_state.bg_color;
+        let fog_density = render_state.fog_density;
         {
             let state = get_state(self);
             state
@@ -925,7 +994,8 @@ impl Pass for PassPBROpaque {
 
         // Background sub-draw: within the same render pass, after opaque geometry.
         // LessEqual depth test + write_enabled=false: fills only pixels where depth == 1.0 (far plane = no geometry).
-        if let Some(bg) = &state_ref.bg {
+        {
+            let bg = &state_ref.bg;
             let eye = Vec3::new(
                 active_camera_transform.position.x,
                 active_camera_transform.position.y,
@@ -948,7 +1018,7 @@ impl Pass for PassPBROpaque {
                 aspect: active_camera_component.aspect.get_value(),
                 fwd: fwd.to_array(),
                 _pad: 0.0,
-                bg_color: self.bg_color,
+                bg_color: render_state.bg_color,
                 _pad2: 0.0,
             };
             renderer
