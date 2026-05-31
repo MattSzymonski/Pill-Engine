@@ -11,6 +11,7 @@ use crate::{
 use pill_core::Result;
 use pill_core::Timer;
 use std::collections::HashMap;
+use std::sync::Arc;
 use winit::{dpi::PhysicalSize, window::Window};
 
 pub struct DummyRenderer;
@@ -112,6 +113,21 @@ impl PillRenderer for DummyRenderer {
     }
 
     fn get_render_target_view(&self, _handle: RendererTextureHandle) -> Option<&wgpu::TextureView> {
+        None
+    }
+
+    fn create_texture_from_pixels(
+        &mut self,
+        _name: &str,
+        _mip_pixels: &[&[u8]],
+        _base_width: u32,
+        _base_height: u32,
+        _format: wgpu::TextureFormat,
+    ) -> RendererTextureHandle {
+        RendererTextureHandle::default()
+    }
+
+    fn get_texture_view(&self, _handle: RendererTextureHandle) -> Option<wgpu::TextureView> {
         None
     }
 }
