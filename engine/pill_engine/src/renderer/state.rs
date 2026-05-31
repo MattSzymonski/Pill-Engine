@@ -2,13 +2,10 @@
 use crate::{
     app_config::EngineConfig,
     graphics::{
-        BufferDesc, Pass, PassPBRStatic, PillRenderer, PipelineV2, PipelineV2Desc,
+        BufferDesc, Pass, PassPBROpaque, PillRenderer, PipelineV2, PipelineV2Desc,
         RendererCameraHandle, RendererTargetDesc, RendererTextureHandle, WorldQuery,
     },
-    internal::{
-        get_renderer_resource_handle_from_camera_component, CameraComponent, ComponentStorage,
-        EntityHandle, RenderQueueItem, TransformComponent,
-    },
+    internal::{get_renderer_resource_handle_from_camera_component, EntityHandle},
     renderer::{
         instance::Instance,
         resources::{
@@ -115,9 +112,7 @@ impl PillRenderer for Renderer {
     fn render(
         &mut self,
         active_camera_entity_handle: EntityHandle,
-        render_queue: &[RenderQueueItem],
-        camera_component_storage: &ComponentStorage<CameraComponent>,
-        transform_component_storage: &ComponentStorage<TransformComponent>,
+        scene: &crate::ecs::Scene,
         delta_time: f32,
         timer: &mut Timer,
         resource_manager: &ResourceManager,
@@ -149,14 +144,12 @@ impl PillRenderer for Renderer {
                     label: Some("render_encoder"),
                 });
 
-        let world = WorldQuery {
-            active_camera: active_camera_entity_handle,
-            render_queue,
-            camera_components: camera_component_storage,
-            transform_components: transform_component_storage,
+        let world = WorldQuery::new(
+            active_camera_entity_handle,
+            scene,
             delta_time,
-            resources: resource_manager,
-        };
+            resource_manager,
+        );
 
         timer.begin_context("Scene Passes");
 

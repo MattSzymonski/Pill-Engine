@@ -39,7 +39,6 @@ pub struct Engine {
     pub(crate) resource_manager: ResourceManager,
     pub(crate) global_components: PillTypeMap,
     pub(crate) input_queue: VecDeque<InputEvent>,
-    pub(crate) render_queue: Vec<RenderQueueItem>,
     pub(crate) window_size: winit::dpi::PhysicalSize<u32>,
     pub(crate) game_resources_directory_path: std::path::PathBuf,
     pub(crate) frame_delta_time: f32, // In milliseconds
@@ -70,7 +69,6 @@ impl Engine {
             resource_manager: ResourceManager::new(),
             global_components: PillTypeMap::new(),
             input_queue: VecDeque::new(),
-            render_queue: Vec::<RenderQueueItem>::with_capacity(max_entity_count),
             window_size: winit::dpi::PhysicalSize::<u32>::default(),
             game_resources_directory_path,
             frame_delta_time: 0.0,
@@ -93,7 +91,6 @@ impl Engine {
             resource_manager: ResourceManager::new(),
             global_components: PillTypeMap::new(),
             input_queue: VecDeque::new(),
-            render_queue: Vec::<RenderQueueItem>::with_capacity(max_entity_count),
             window_size: winit::dpi::PhysicalSize::<u32>::default(),
             game_resources_directory_path: std::path::PathBuf::new(),
             frame_delta_time: 0.0.into(),
@@ -679,7 +676,7 @@ impl Engine {
     }
 
     /// Provides IBL map bytes (diffuse irradiance, specular prefilter, BRDF LUT);
-    /// used by PassPBRStatic on first-frame init.
+    /// used by PassPBROpaque on first-frame init.
     /// Must be called before the first rendered frame (i.e. from `start()`).
     pub fn set_ibl_textures(
         &mut self,

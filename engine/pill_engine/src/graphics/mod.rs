@@ -6,7 +6,7 @@ mod pass_background;
 #[cfg(feature = "ui")]
 mod pass_egui;
 mod pass_mesh;
-mod pass_pbr_static;
+mod pass_pbr_opaque;
 mod pass_tonemap;
 mod render_queue;
 mod renderer;
@@ -25,7 +25,7 @@ pub use pass_background::PassBackground;
 #[cfg(feature = "ui")]
 pub use pass_egui::PassEgui;
 pub use pass_mesh::PassMesh;
-pub use pass_pbr_static::PassPBRStatic;
+pub use pass_pbr_opaque::PassPBROpaque;
 pub use pass_tonemap::PassTonemap;
 
 pub use render_queue::{

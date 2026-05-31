@@ -206,16 +206,16 @@ impl Pass for PassBackground {
         let state = self.state.as_ref().unwrap();
 
         // Compute inv_view_proj from active camera — same matrices as PBR pass.
+        let camera_components = world.query::<CameraComponent>()?;
+        let transform_components = world.query::<TransformComponent>()?;
         let active_idx = world.active_camera.data().index as usize;
-        let cam = world
-            .camera_components
+        let cam = camera_components
             .data
             .get(active_idx)
             .unwrap()
             .as_ref()
             .unwrap();
-        let tfm = world
-            .transform_components
+        let tfm = transform_components
             .data
             .get(active_idx)
             .unwrap()

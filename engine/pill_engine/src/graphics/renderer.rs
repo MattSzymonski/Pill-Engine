@@ -3,8 +3,7 @@
 use crate::ecs::EguiClient;
 use crate::{
     app_config::EngineConfig,
-    ecs::{CameraComponent, ComponentStorage, EntityHandle, TransformComponent},
-    graphics::RenderQueueItem,
+    ecs::{Component, ComponentStorage, EntityHandle, Scene},
     resources::{ResourceManager, ShaderParameterSlot, ShaderTextureSlot, TextureType},
 };
 
@@ -37,13 +36,38 @@ pill_core::define_new_pill_slotmap_key! {
 
 // --- Pass API types ---
 
+/// Read-only view of the world handed to each pass. A pass calls `query::<T>()` for whatever
+/// component types it needs and builds its OWN draw list (opaque, translucent, shadow, …).
+/// The renderer stays domain-agnostic — it never names concrete component types.
 pub struct WorldQuery<'a> {
     pub active_camera: EntityHandle,
-    pub render_queue: &'a [RenderQueueItem],
-    pub camera_components: &'a ComponentStorage<CameraComponent>,
-    pub transform_components: &'a ComponentStorage<TransformComponent>,
     pub delta_time: f32,
     pub resources: &'a ResourceManager,
+    scene: &'a Scene,
+}
+
+impl<'a> WorldQuery<'a> {
+    pub fn new(
+        active_camera: EntityHandle,
+        scene: &'a Scene,
+        delta_time: f32,
+        resources: &'a ResourceManager,
+    ) -> Self {
+        Self {
+            active_camera,
+            delta_time,
+            resources,
+            scene,
+        }
+    }
+
+    /// Borrow the storage for component type `T` from the active scene.
+    pub fn query<T>(&self) -> Result<&'a ComponentStorage<T>>
+    where
+        T: Component<Storage = ComponentStorage<T>>,
+    {
+        self.scene.get_component_storage::<T>()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -144,9 +168,7 @@ pub trait PillRenderer {
     fn render(
         &mut self,
         active_camera_entity_handle: EntityHandle,
-        render_queue: &[RenderQueueItem],
-        camera_component_storage: &ComponentStorage<CameraComponent>,
-        transform_component_storage: &ComponentStorage<TransformComponent>,
+        scene: &Scene,
         delta_time: f32,
         timer: &mut Timer,
         resource_manager: &ResourceManager,

@@ -1,6 +1,6 @@
 use crate::config::{DEFAULT_BRDF_LUT_FALLBACK_PIXEL, DEFAULT_IBL_FALLBACK_PIXEL};
 use crate::{
-    ecs::{CameraComponent, ComponentStorage, TransformComponent},
+    ecs::{CameraComponent, ComponentStorage, PbrRenderableComponent, TransformComponent},
     graphics::{
         decompose_render_queue_key, BufferDesc, Pass, PillRenderer, PipelineV2, PipelineV2Desc,
         RendererMaterialHandle, RendererMeshHandle, RendererTextureHandle, ShaderDesc, WorldQuery,
@@ -93,11 +93,12 @@ pub const MATERIAL_BIND_GROUP_TEXTURES: usize = 1;
 pub const MATERIAL_BIND_GROUP_PARAMS: usize = 2;
 pub const MATERIAL_BIND_GROUP_PERDRAW: usize = 3;
 
-/// Mesh batch within a material group: same mesh, a contiguous instance range in the storage array.
+/// Mesh batch within a material group: same mesh, its per-instance transforms accumulated this
+/// frame; `base_offset_u32` is its first index in the concatenated storage buffer.
 pub(crate) struct MeshBatch {
     pub(crate) mesh_handle: RendererMeshHandle,
-    pub(crate) base_offset_u32: u32, // first instance index
-    pub(crate) instance_count: u32,
+    pub(crate) instances: Vec<PerDrawStd140>,
+    pub(crate) base_offset_u32: u32,
 }
 
 /// Draw group: one pipeline + one material, containing one or more mesh batches.
@@ -129,7 +130,7 @@ struct BgSubState {
 }
 
 /// GPU-side pass state initialized in `Pass::init`, read every `Pass::draw`.
-struct PassPBRStaticState {
+struct PassPBROpaqueState {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
@@ -141,7 +142,7 @@ struct PassPBRStaticState {
 }
 
 /// Default PBR pass: GGX shading with IBL, one instanced draw per material/mesh batch.
-pub struct PassPBRStatic {
+pub struct PassPBROpaque {
     color_target: Option<RendererTextureHandle>,
     depth_texture: Option<RendererTextureHandle>,
     groups_buffer: Vec<GroupCmd>,
@@ -153,10 +154,10 @@ pub struct PassPBRStatic {
     fog_density: f32,
     bg_equirect: Option<RendererTextureHandle>,
     bg_color: [f32; 3],
-    state: Option<PassPBRStaticState>,
+    state: Option<PassPBROpaqueState>,
 }
 
-impl PassPBRStatic {
+impl PassPBROpaque {
     /// Creates the pass; `Pass::init` must run before the first frame.
     pub fn new(color_target: Option<RendererTextureHandle>) -> Self {
         Self {
@@ -203,22 +204,22 @@ impl PassPBRStatic {
 }
 
 /// Returns the initialized pass state; panics in debug if `init` was not called.
-fn get_state(pass: &mut PassPBRStatic) -> &mut PassPBRStaticState {
+fn get_state(pass: &mut PassPBROpaque) -> &mut PassPBROpaqueState {
     debug_assert!(pass.state.is_some());
     pass.state
         .as_mut()
-        .expect("PassPBRStatic: state not initialized — call init() before draw()")
+        .expect("PassPBROpaque: state not initialized — call init() before draw()")
 }
 
-impl Pass for PassPBRStatic {
+impl Pass for PassPBROpaque {
     fn get_label(&self) -> &str {
-        "pass_pbr_static"
+        "pass_pbr_opaque"
     }
 
     fn init(&mut self, renderer: &mut dyn PillRenderer) -> Result<()> {
-        let vertex_wgsl = include_str!("../../res/shaders/pbr_static_vertex.wgsl");
+        let vertex_wgsl = include_str!("../../res/shaders/pbr_opaque_vertex.wgsl");
 
-        let fragment_wgsl = include_str!("../../res/shaders/pbr_static_fragment.wgsl");
+        let fragment_wgsl = include_str!("../../res/shaders/pbr_opaque_fragment.wgsl");
 
         let bind_groups: Vec<Vec<wgpu::BindGroupLayoutEntry>> = vec![
             // 0: globals (camera + IBL irradiance + prefilter + BRDF LUT)
@@ -374,7 +375,7 @@ impl Pass for PassPBRStatic {
         ];
 
         let desc = PipelineV2Desc {
-            label: Some("pass_pbr_static_pipeline"),
+            label: Some("pass_pbr_opaque_pipeline"),
             vs: ShaderDesc {
                 source: vertex_wgsl,
                 entry_func: "vs_main",
@@ -416,7 +417,7 @@ impl Pass for PassPBRStatic {
         let camera_buffer = {
             let device = renderer.get_device();
             device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pass_pbr_static_camera_buffer"),
+                label: Some("pass_pbr_opaque_camera_buffer"),
                 size: std::mem::size_of::<CameraUniform>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
@@ -424,7 +425,7 @@ impl Pass for PassPBRStatic {
         };
 
         let per_draw_buffer = renderer.create_buffer(BufferDesc {
-            label: Some("pass_pbr_static_per_draw"),
+            label: Some("pass_pbr_opaque_per_draw"),
             byte_size: (PER_DRAW_STRIDE_BYTES * MAX_EXPECTED_PER_DRAW_INSTANCES) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         })?;
@@ -432,7 +433,7 @@ impl Pass for PassPBRStatic {
             let layout = &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_PERDRAW];
             let device = renderer.get_device();
             device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pass_pbr_static_per_draw_bind_group"),
+                label: Some("pass_pbr_opaque_per_draw_bind_group"),
                 layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
@@ -512,7 +513,7 @@ impl Pass for PassPBRStatic {
             let layout = &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_GLOBALS];
             let device = renderer.get_device();
             device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("pass_pbr_static_globals_bind_group"),
+                label: Some("pass_pbr_opaque_globals_bind_group"),
                 layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -547,7 +548,7 @@ impl Pass for PassPBRStatic {
             })
         };
 
-        self.depth_texture = Some(renderer.create_depth_texture("pass_pbr_static_depth")?);
+        self.depth_texture = Some(renderer.create_depth_texture("pass_pbr_opaque_depth")?);
 
         // Create background sub-draw state if an equirect handle was provided.
         let bg = if let Some(equirect_h) = self.bg_equirect {
@@ -582,7 +583,7 @@ impl Pass for PassPBRStatic {
                 },
             ]];
             let bg_pipeline = renderer.create_pipeline_v2(PipelineV2Desc {
-                label: Some("pass_pbr_static_bg_pipeline"),
+                label: Some("pass_pbr_opaque_bg_pipeline"),
                 vs: ShaderDesc {
                     source: bg_vs,
                     entry_func: "vs_main",
@@ -634,7 +635,7 @@ impl Pass for PassPBRStatic {
             let bg_camera_buf = renderer
                 .get_device()
                 .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pass_pbr_static_bg_camera"),
+                    label: Some("pass_pbr_opaque_bg_camera"),
                     size: std::mem::size_of::<BgCameraUbo>() as u64,
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
@@ -644,7 +645,7 @@ impl Pass for PassPBRStatic {
                 renderer
                     .get_device()
                     .create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("pass_pbr_static_bg_bind_group"),
+                        label: Some("pass_pbr_opaque_bg_bind_group"),
                         layout,
                         entries: &[
                             wgpu::BindGroupEntry {
@@ -672,7 +673,7 @@ impl Pass for PassPBRStatic {
             None
         };
 
-        self.state = Some(PassPBRStaticState {
+        self.state = Some(PassPBROpaqueState {
             camera_uniform: CameraUniform::new(),
             camera_buffer,
             globals_bind_group,
@@ -694,17 +695,20 @@ impl Pass for PassPBRStatic {
         view: &wgpu::TextureView,
         world: &WorldQuery<'_>,
     ) -> Result<()> {
+        // Query the component storages this pass needs.
+        let camera_components = world.query::<CameraComponent>()?;
+        let transform_components = world.query::<TransformComponent>()?;
+        let pbr_renderable_components = world.query::<PbrRenderableComponent>()?;
+
         // Read active camera and transform.
         let active_camera_index = world.active_camera.data().index as usize;
-        let active_camera_component = world
-            .camera_components
+        let active_camera_component = camera_components
             .data
             .get(active_camera_index)
             .unwrap()
             .as_ref()
             .unwrap();
-        let active_camera_transform = world
-            .transform_components
+        let active_camera_transform = transform_components
             .data
             .get(active_camera_index)
             .unwrap()
@@ -729,24 +733,31 @@ impl Pass for PassPBRStatic {
             );
         }
 
-        // Single pass over the pre-sorted render queue (key order = shader→material→mesh, so
-        // same material/mesh runs are contiguous): build groups/batches AND stream model
-        // matrices into the staging buffer in one sweep. No visible set, no MVP on CPU, no
-        // per-batch search. [Aaltonen "HypeHype" GDC 2023 — batch-upload once per pass]
-        self.groups_buffer.clear();
-        self.staging_buffer.clear();
-        let mut next_instance: u32 = 0;
-        let mut last_material: Option<RendererMaterialHandle> = None;
-        let mut last_mesh: Option<RendererMeshHandle> = None;
-        for render_queue_item in world.render_queue.iter() {
-            if next_instance as usize >= MAX_EXPECTED_PER_DRAW_INSTANCES {
-                log::error!(
-                    "PassPBRStatic: per-draw capacity exceeded (capacity={})",
-                    MAX_EXPECTED_PER_DRAW_INSTANCES
-                );
-                break;
+        // Data-driven: this pass builds its OWN opaque draw list by querying the world. Iterate the
+        // contiguous transform + pbr_renderable arrays, group by material+mesh (find-or-create, since
+        // ECS order is unsorted) to minimize bind-group/vertex-buffer switches — the grouping exists
+        // to cut GPU state changes, not for visual order. Group order is irrelevant (opaque, depth-
+        // tested). [Aaltonen "HypeHype" GDC 2023]
+        for group in self.groups_buffer.iter_mut() {
+            for batch in group.batches.iter_mut() {
+                batch.instances.clear(); // reuse capacity across frames
             }
-            let key_fields = decompose_render_queue_key(render_queue_item.key);
+        }
+        let transforms = &transform_components.data;
+        let pbrs = &pbr_renderable_components.data;
+        for (slot_transform, slot_pbr) in transforms.iter().zip(pbrs.iter()) {
+            let transform = match slot_transform {
+                Some(transform) => transform,
+                None => continue,
+            };
+            let pbr = match slot_pbr {
+                Some(pbr) => pbr,
+                None => continue,
+            };
+            let Some(key) = pbr.render_queue_key else {
+                continue;
+            };
+            let key_fields = decompose_render_queue_key(key);
             let mesh_handle = RendererMeshHandle::new(
                 key_fields.mesh_index.into(),
                 NonZeroU32::new(key_fields.mesh_version.into()).unwrap(),
@@ -755,40 +766,76 @@ impl Pass for PassPBRStatic {
                 key_fields.material_index.into(),
                 NonZeroU32::new(key_fields.material_version.into()).unwrap(),
             );
-
-            // Stream raw pos/rot/scale directly (GPU builds model = T·R·S, then MVP).
-            self.staging_buffer
-                .extend_from_slice(bytemuck::bytes_of(&PerDrawStd140 {
-                    position: render_queue_item.position,
-                    rotation: render_queue_item.rotation,
-                    scale: render_queue_item.scale,
-                }));
-
-            if last_material != Some(material_handle) {
-                self.groups_buffer.push(GroupCmd {
-                    material_handle,
-                    batches: Vec::new(),
-                });
-                last_material = Some(material_handle);
-                last_mesh = None;
-            }
-            let group = self.groups_buffer.last_mut().unwrap();
-            if last_mesh != Some(mesh_handle) {
-                group.batches.push(MeshBatch {
+            let per_draw = PerDrawStd140 {
+                position: [
+                    transform.position.x,
+                    transform.position.y,
+                    transform.position.z,
+                    0.0,
+                ],
+                rotation: [
+                    transform.rotation.x,
+                    transform.rotation.y,
+                    transform.rotation.z,
+                    0.0,
+                ],
+                scale: [transform.scale.x, transform.scale.y, transform.scale.z, 0.0],
+            };
+            let group_index = match self
+                .groups_buffer
+                .iter()
+                .position(|group| group.material_handle == material_handle)
+            {
+                Some(index) => index,
+                None => {
+                    self.groups_buffer.push(GroupCmd {
+                        material_handle,
+                        batches: Vec::new(),
+                    });
+                    self.groups_buffer.len() - 1
+                }
+            };
+            let group = &mut self.groups_buffer[group_index];
+            match group
+                .batches
+                .iter_mut()
+                .find(|batch| batch.mesh_handle == mesh_handle)
+            {
+                Some(batch) => batch.instances.push(per_draw),
+                None => group.batches.push(MeshBatch {
                     mesh_handle,
-                    base_offset_u32: next_instance,
-                    instance_count: 0,
-                });
-                last_mesh = Some(mesh_handle);
+                    instances: vec![per_draw],
+                    base_offset_u32: 0,
+                }),
             }
-            group.batches.last_mut().unwrap().instance_count += 1;
-            next_instance = next_instance.wrapping_add(1);
+        }
+
+        // Concatenate per-batch instances into the storage buffer (sequential — cache-friendly) and
+        // assign each batch its first-instance offset. Single upload per pass. [Aaltonen GDC 2023]
+        self.staging_buffer.clear();
+        let mut next_instance: u32 = 0;
+        for group in self.groups_buffer.iter_mut() {
+            for batch in group.batches.iter_mut() {
+                batch.base_offset_u32 = next_instance;
+                for per_draw in &batch.instances {
+                    self.staging_buffer
+                        .extend_from_slice(bytemuck::bytes_of(per_draw));
+                    next_instance = next_instance.wrapping_add(1);
+                }
+            }
+        }
+        if next_instance as usize > MAX_EXPECTED_PER_DRAW_INSTANCES {
+            log::error!(
+                "PassPBROpaque: per-draw capacity exceeded (needed={}, capacity={})",
+                next_instance,
+                MAX_EXPECTED_PER_DRAW_INSTANCES
+            );
         }
         {
             let state_ref = self
                 .state
                 .as_ref()
-                .expect("PassPBRStatic: state not initialized — call init() before draw()");
+                .expect("PassPBROpaque: state not initialized — call init() before draw()");
             renderer
                 .get_queue()
                 .write_buffer(&state_ref.per_draw_buffer, 0, &self.staging_buffer);
@@ -803,7 +850,7 @@ impl Pass for PassPBRStatic {
             .unwrap_or(view);
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("pass_pbr_static_render_pass"),
+            label: Some("pass_pbr_opaque_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 resolve_target: None,
@@ -827,7 +874,7 @@ impl Pass for PassPBRStatic {
         let state_ref = self
             .state
             .as_ref()
-            .expect("PassPBRStatic: state not initialized — call init() before draw()");
+            .expect("PassPBROpaque: state not initialized — call init() before draw()");
         render_pass.set_pipeline(&state_ref.pipeline.pipeline);
         // Per-draw array bound once; instance_index selects per-entity data — 5 draws instead of 60k.
         // [Lottes @NOTimothyLottes 2025-01-23; WebGPU W3C 2024 §drawIndexed firstInstance]
@@ -846,7 +893,7 @@ impl Pass for PassPBRStatic {
             let mat = world
                 .resources
                 .get_resource::<RendererMaterial>(&group.material_handle)
-                .expect("PassPBRStatic: RendererMaterial missing for draw group");
+                .expect("PassPBROpaque: RendererMaterial missing for draw group");
 
             // Skip materials that don't have PBR-compatible bind groups.
             let (Some(textures_bg), Some(params_bg)) = (
@@ -862,12 +909,15 @@ impl Pass for PassPBRStatic {
                 let mesh = world
                     .resources
                     .get_resource::<RendererMesh>(&batch.mesh_handle)
-                    .expect("PassPBRStatic: RendererMesh missing for batch");
+                    .expect("PassPBROpaque: RendererMesh missing for batch");
                 render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 let first = batch.base_offset_u32;
-                let count = batch.instance_count;
+                let count = batch.instances.len() as u32;
+                if count == 0 {
+                    continue; // material/mesh with no instances this frame
+                }
                 // One instanced draw per batch: instance_index in [first, first+count) selects per-draw data.
                 render_pass.draw_indexed(0..mesh.index_count, 0, first..(first + count));
             }

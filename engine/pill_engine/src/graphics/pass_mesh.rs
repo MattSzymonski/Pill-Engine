@@ -1,8 +1,7 @@
 use std::{num::NonZeroU32, ops::Range};
 
-use crate::graphics::{
-    RenderQueueItem, RendererMaterialHandle, RendererMeshHandle, RendererShaderHandle,
-};
+use crate::ecs::{CameraComponent, PbrRenderableComponent, TransformComponent};
+use crate::graphics::{RendererMaterialHandle, RendererMeshHandle, RendererShaderHandle};
 use crate::internal::decompose_render_queue_key;
 use crate::{
     graphics::{Pass, PillRenderer, RendererTextureHandle, WorldQuery},
@@ -227,17 +226,20 @@ impl Pass for PassMesh {
         view: &wgpu::TextureView,
         world: &WorldQuery<'_>,
     ) -> Result<()> {
+        // Query the component storages this pass needs.
+        let camera_components = world.query::<CameraComponent>()?;
+        let transform_components = world.query::<TransformComponent>()?;
+        let pbr_renderable_components = world.query::<PbrRenderableComponent>()?;
+
         // Resolve active camera.
         let active_camera_index = world.active_camera.data().index as usize;
-        let active_camera_component = world
-            .camera_components
+        let active_camera_component = camera_components
             .data
             .get(active_camera_index)
             .unwrap()
             .as_ref()
             .unwrap();
-        let active_camera_transform = world
-            .transform_components
+        let active_camera_transform = transform_components
             .data
             .get(active_camera_index)
             .unwrap()
@@ -291,8 +293,15 @@ impl Pass for PassMesh {
         let render_pass: &mut wgpu::RenderPass<'static> =
             unsafe { std::mem::transmute(&mut render_pass) };
 
-        for (i, instance_batch) in world
-            .render_queue
+        // Build this pass's draw list by querying the world (data-driven; no engine-global queue):
+        // every entity with a PbrRenderableComponent is an instance.
+        let renderable_indices: Vec<u32> = pbr_renderable_components
+            .data
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.as_ref().map(|_| index as u32))
+            .collect();
+        for (i, instance_batch) in renderable_indices
             .chunks(MAX_INSTANCE_PER_DRAWCALL_COUNT)
             .enumerate()
         {
@@ -302,11 +311,10 @@ impl Pass for PassMesh {
 
             self.instances.clear();
 
-            for render_queue_item in instance_batch {
-                let transform_slot = world
-                    .transform_components
+            for &entity_index in instance_batch {
+                let transform_slot = transform_components
                     .data
-                    .get(render_queue_item.entity_index as usize)
+                    .get(entity_index as usize)
                     .ok_or_else(|| -> pill_core::PillError { RendererError::Other.into() })?;
                 let transform_component = transform_slot
                     .as_ref()
@@ -324,8 +332,14 @@ impl Pass for PassMesh {
 
             current_drawing_context.accumulated_instance_range = 0..0;
 
-            for (j, render_queue_item) in instance_batch.iter().enumerate() {
-                let key_fields = decompose_render_queue_key(render_queue_item.key);
+            for (j, &entity_index) in instance_batch.iter().enumerate() {
+                let key = pbr_renderable_components
+                    .data
+                    .get(entity_index as usize)
+                    .and_then(|slot| slot.as_ref())
+                    .and_then(|pbr| pbr.render_queue_key)
+                    .unwrap_or(0);
+                let key_fields = decompose_render_queue_key(key);
 
                 let renderer_shader_handle = RendererShaderHandle::new(
                     key_fields.shader_index.into(),

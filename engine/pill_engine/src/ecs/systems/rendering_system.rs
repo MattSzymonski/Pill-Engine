@@ -1,18 +1,14 @@
 use crate::{
     config::RENDERING_SYSTEM,
-    ecs::{
-        CameraAspectRatio, CameraComponent, EntityHandle, PbrRenderableComponent,
-        RenderStateComponent, TransformComponent,
-    },
+    ecs::{CameraAspectRatio, CameraComponent, EntityHandle, RenderStateComponent},
     engine::Engine,
-    graphics::{PassPBRStatic, PassTonemap, RenderQueueItem, RendererTargetDesc},
+    graphics::{PassPBROpaque, PassTonemap, RendererTargetDesc},
 };
 
-use pill_core::{warn, EngineError, LogContext, PillSlotMapKey, PillStyle, RendererError, Timer};
+use pill_core::{EngineError, RendererError, Timer};
 use wgpu;
 
-use pill_core::{ErrorContext, Result};
-use web_time::Instant;
+use pill_core::Result;
 
 pub fn rendering_system(engine: &mut Engine) -> Result<()> {
     let mut timer = Timer::new();
@@ -45,7 +41,7 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
         #[cfg_attr(not(feature = "ui"), allow(unused_mut))]
         let mut passes: Vec<Box<dyn crate::graphics::Pass>> = vec![
             Box::new(
-                PassPBRStatic::new(Some(hdr))
+                PassPBROpaque::new(Some(hdr))
                     .with_background(bg, bg_color)
                     .with_ibl(diff, spec, lut)
                     .with_fog(bg_color, fog_density),
@@ -71,7 +67,6 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
 
     timer.record("Get active camera");
 
-    let active_scene_handle = engine.scene_manager.get_active_scene_handle()?;
     let mut active_camera_entity_handle_result: Option<EntityHandle> = None;
 
     {
@@ -97,87 +92,16 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
             pill_core::PillError::from(EngineError::NoActiveCamera)
         })?;
 
-    timer.record("Clear render queue");
-
-    engine.render_queue.clear();
-    engine.render_queue.reserve(200000);
-
-    timer.record("Prepare render queue");
-
-    let mut _matrix_calculation_duration: f32 = 0.0;
-    let mut add_to_render_queue_duration: f32 = 0.0;
-
-    // GPU fast-path: copy raw pos/rot/scale during the cache-warm sequential scan — NO trig,
-    // no matrix build. The vertex shader composes model = T·R·S on the GPU. [Aaltonen GDC 2023]
-    for (entity_handle, transform, pbr_renderable_component) in engine
-        .scene_manager
-        .get_two_component_iterator_mut::<TransformComponent, PbrRenderableComponent>(
-        active_scene_handle,
-    )? {
-        let add_to_render_queue_start_time = Instant::now();
-        if let Some(render_queue_key) = pbr_renderable_component.render_queue_key {
-            let p = transform.position;
-            let r = transform.rotation;
-            let s = transform.scale;
-            engine.render_queue.push(RenderQueueItem {
-                key: render_queue_key,
-                entity_index: entity_handle.data().index,
-                position: [p.x, p.y, p.z, 0.0],
-                rotation: [r.x, r.y, r.z, 0.0],
-                scale: [s.x, s.y, s.z, 0.0],
-            });
-        } else {
-            warn!(LogContext::Rendering => "Invalid render queue key");
-            continue;
-        }
-        add_to_render_queue_duration +=
-            add_to_render_queue_start_time.elapsed().as_secs_f32() * 1000.0;
-    }
-
-    timer.record(format!(
-        "Matrix calculation {} ms",
-        _matrix_calculation_duration
-    ));
-    timer.record(format!(
-        "Add to render queue {} ms",
-        add_to_render_queue_duration
-    ));
-
-    timer.record("Sort render queue");
-
-    // pdqsort by key — measured faster here than hand-rolled radix/counting sort, because the
-    // scene has few distinct keys and the builtin handles many-equal-elements partitioning well.
-    engine.render_queue.sort_unstable_by_key(|item| item.key);
-
-    timer.record("Get component storages");
-
-    let active_scene = engine.scene_manager.get_active_scene_mut()?;
-    let camera_component_storage = active_scene
-        .get_component_storage::<CameraComponent>()
-        .context(format!(
-            "{}: Cannot get active {}",
-            "rendering_system".specific_object_style(),
-            "Camera".general_object_style()
-        ))?;
-    let transform_component_storage = active_scene
-        .get_component_storage::<TransformComponent>()
-        .context(format!(
-            "{}: Cannot get {}",
-            "rendering_system".specific_object_style(),
-            "TransformComponents".specific_object_style()
-        ))
-        .unwrap();
-
     timer.begin_context("Render");
 
-    // Render
+    // Stateless: the engine hands the active scene to the renderer; each pass queries the
+    // component types it needs via WorldQuery::query::<T>() and builds its own draw list.
+    let active_scene = engine.scene_manager.get_active_scene()?;
     let delta_time = engine.frame_delta_time;
 
     let render_result = engine.renderer.render(
         active_camera_entity_handle,
-        &engine.render_queue,
-        camera_component_storage,
-        transform_component_storage,
+        active_scene,
         delta_time,
         &mut timer,
         &engine.resource_manager,

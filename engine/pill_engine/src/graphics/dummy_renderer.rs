@@ -1,9 +1,9 @@
 use crate::{
     app_config::EngineConfig,
-    ecs::{CameraComponent, ComponentStorage, EntityHandle, TransformComponent},
+    ecs::{EntityHandle, Scene},
     graphics::{
-        BufferDesc, Pass, PillRenderer, PipelineV2, PipelineV2Desc, RenderQueueItem,
-        RendererCameraHandle, RendererTargetDesc, RendererTextureHandle, WorldQuery,
+        BufferDesc, Pass, PillRenderer, PipelineV2, PipelineV2Desc, RendererCameraHandle,
+        RendererTargetDesc, RendererTextureHandle, WorldQuery,
     },
     resources::{ResourceManager, ShaderParameterSlot, ShaderTextureSlot},
 };
@@ -56,9 +56,7 @@ impl PillRenderer for DummyRenderer {
     fn render(
         &mut self,
         _active_camera_entity_handle: EntityHandle,
-        _render_queue: &[RenderQueueItem],
-        _camera_component_storage: &ComponentStorage<CameraComponent>,
-        _transform_component_storage: &ComponentStorage<TransformComponent>,
+        _scene: &Scene,
         _delta_time: f32,
         _timer: &mut Timer,
         _resource_manager: &ResourceManager,
