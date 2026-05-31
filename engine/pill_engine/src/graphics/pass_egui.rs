@@ -98,7 +98,7 @@ impl EguiDrawer {
         self.renderer
             .update_buffers(device, queue, encoder, &tris, &screen_descriptor);
 
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: window_surface_view,
                 resolve_target: None,
@@ -115,11 +115,10 @@ impl EguiDrawer {
 
         timer.record("Render");
 
-        let render_pass: &mut wgpu::RenderPass<'static> =
-            unsafe { std::mem::transmute(&mut render_pass) };
+        let mut render_pass = render_pass.forget_lifetime();
 
         self.renderer
-            .render(&mut *render_pass, &tris, &screen_descriptor);
+            .render(&mut render_pass, &tris, &screen_descriptor);
 
         for texture_id in &full_output.textures_delta.free {
             self.renderer.free_texture(texture_id)

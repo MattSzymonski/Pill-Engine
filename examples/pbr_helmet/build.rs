@@ -45,11 +45,13 @@ fn main() {
         let mut out = std::fs::File::create(&f32bin).unwrap();
         out.write_all(&out_w.to_le_bytes()).unwrap();
         out.write_all(&out_h.to_le_bytes()).unwrap();
+        let mut row = Vec::with_capacity((out_w * 4 * 4) as usize);
         for px in resized.pixels() {
-            out.write_all(&px.0[0].to_le_bytes()).unwrap();
-            out.write_all(&px.0[1].to_le_bytes()).unwrap();
-            out.write_all(&px.0[2].to_le_bytes()).unwrap();
-            out.write_all(&1.0f32.to_le_bytes()).unwrap();
+            row.extend_from_slice(&px.0[0].to_le_bytes());
+            row.extend_from_slice(&px.0[1].to_le_bytes());
+            row.extend_from_slice(&px.0[2].to_le_bytes());
+            row.extend_from_slice(&1.0f32.to_le_bytes());
         }
+        out.write_all(&row).unwrap();
     }
 }

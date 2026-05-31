@@ -261,7 +261,7 @@ impl Pass for PassMesh {
 
         debug!(LogContext::Frame => "Recording mesh draw commands");
 
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pass_mesh"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view,
@@ -290,8 +290,7 @@ impl Pass for PassMesh {
 
         let mut current_drawing_context = DrawingContext::default();
 
-        let render_pass: &mut wgpu::RenderPass<'static> =
-            unsafe { std::mem::transmute(&mut render_pass) };
+        let mut render_pass = render_pass.forget_lifetime();
 
         // Build this pass's draw list by querying the world (data-driven; no engine-global queue):
         // every entity with a PbrRenderableComponent is an instance.
@@ -355,43 +354,43 @@ impl Pass for PassMesh {
                 );
 
                 if current_drawing_context.rendering_order > key_fields.order {
-                    current_drawing_context.record_draw_accumulated_instances(render_pass);
+                    current_drawing_context.record_draw_accumulated_instances(&mut render_pass);
                     current_drawing_context.change_rendering_order(key_fields.order);
                 }
 
                 if current_drawing_context.shader_handle != Some(renderer_shader_handle) {
-                    current_drawing_context.record_draw_accumulated_instances(render_pass);
+                    current_drawing_context.record_draw_accumulated_instances(&mut render_pass);
                     current_drawing_context.change_shader(
                         world.resources,
                         renderer.get_engine_parameters(),
                         renderer_shader_handle,
-                        render_pass,
+                        &mut render_pass,
                         self.camera.as_ref().unwrap(),
                     );
                 }
 
                 if current_drawing_context.material_handle != Some(renderer_material_handle) {
-                    current_drawing_context.record_draw_accumulated_instances(render_pass);
+                    current_drawing_context.record_draw_accumulated_instances(&mut render_pass);
                     current_drawing_context.change_material(
                         world.resources,
                         renderer_material_handle,
-                        render_pass,
+                        &mut render_pass,
                     );
                 }
 
                 if current_drawing_context.mesh_handle != Some(renderer_mesh_handle) {
-                    current_drawing_context.record_draw_accumulated_instances(render_pass);
+                    current_drawing_context.record_draw_accumulated_instances(&mut render_pass);
                     current_drawing_context.change_mesh(
                         world.resources,
                         renderer_mesh_handle,
-                        render_pass,
+                        &mut render_pass,
                     );
                 }
 
                 current_drawing_context.accumulate_instance();
 
                 if j == batch_size - 1 {
-                    current_drawing_context.record_draw_accumulated_instances(render_pass);
+                    current_drawing_context.record_draw_accumulated_instances(&mut render_pass);
                 }
             }
         }

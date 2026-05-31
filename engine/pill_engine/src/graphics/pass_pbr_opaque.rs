@@ -78,14 +78,12 @@ impl CameraUniform {
 
 /// Per-draw storage entry: raw pos/rot/scale (48 B). GPU builds model = T·R·S and MVP.
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct PerDrawStd140 {
     position: [f32; 4], // xyz
     rotation: [f32; 4], // xyz, radians
     scale: [f32; 4],    // xyz
 }
-unsafe impl bytemuck::Zeroable for PerDrawStd140 {}
-unsafe impl bytemuck::Pod for PerDrawStd140 {}
 
 // Storage buffer (StructuredBuffer / var<storage,read>) indexed by SV_InstanceID replaces
 // dynamic-offset UBO: eliminates Metal's 256-B alignment tax and 120k per-instance API calls.
@@ -815,13 +813,11 @@ impl Pass for PassPBROpaque {
         let transforms = &transform_components.data;
         let pbrs = &pbr_renderable_components.data;
         for (slot_transform, slot_pbr) in transforms.iter().zip(pbrs.iter()) {
-            let transform = match slot_transform {
-                Some(transform) => transform,
-                None => continue,
+            let Some(transform) = slot_transform else {
+                continue;
             };
-            let pbr = match slot_pbr {
-                Some(pbr) => pbr,
-                None => continue,
+            let Some(pbr) = slot_pbr else {
+                continue;
             };
             let Some(key) = pbr.render_queue_key else {
                 continue;

@@ -12,6 +12,7 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
+// SAFETY: wasm32 is single-threaded, so assuming single-threaded allocator access is sound.
 static ALLOC: lol_alloc::AssumeSingleThreaded<lol_alloc::FreeListAllocator> =
     unsafe { lol_alloc::AssumeSingleThreaded::new(lol_alloc::FreeListAllocator::new()) };
 
