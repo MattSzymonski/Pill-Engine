@@ -3,6 +3,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod audio_system;
 pub(crate) mod deferred_update_system;
+#[cfg(feature = "ui")]
+pub(crate) mod egui_system;
 pub(crate) mod input_system;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod networking_system;
