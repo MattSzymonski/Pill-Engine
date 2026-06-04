@@ -116,34 +116,11 @@ pub(crate) fn write_rtex_hdr_mip(path: &Path, w: u32, h: u32, mips: &[Vec<f32>])
     Ok(())
 }
 
-// RTEX v1: Rgba8UnormSrgb (legacy LDR IBL outputs).
+// RTEX v1: Rgba8UnormSrgb (legacy LDR IBL outputs). Bytes built by the shared writer.
 pub(crate) fn write_rtex(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
-    let mut out = Vec::with_capacity(16 + rgba.len());
-    out.extend_from_slice(b"RTEX");
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&w.to_le_bytes());
-    out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(rgba);
-    std::fs::write(path, &out).with_context(|| format!("write_rtex {path:?}"))?;
+    std::fs::write(path, crate::convert::rtex_bytes(w, h, rgba))
+        .with_context(|| format!("write_rtex {path:?}"))?;
     Ok(())
-}
-
-pub(crate) fn linear_to_srgb(x: f32) -> u8 {
-    let c = x.clamp(0.0, 1.0);
-    let s = if c <= 0.003_130_8 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    };
-    (s * 255.0 + 0.5) as u8
-}
-
-pub(crate) fn srgb_to_linear(x: f32) -> f32 {
-    if x <= 0.040_45 {
-        x / 12.92
-    } else {
-        ((x + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 pub(crate) fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {

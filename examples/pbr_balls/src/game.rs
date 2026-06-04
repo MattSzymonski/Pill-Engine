@@ -13,7 +13,7 @@ pub struct Game {}
 impl PillGame for Game {
     fn start(&self, engine: &mut Engine) -> Result<()> {
         let (eq, eq_w, eq_h) = bake::generate();
-        let (diffuse, specular_mips, brdf_lut) = bake::bake_all(&eq, eq_w, eq_h);
+        let (diffuse, specular_mips, brdf_lut) = bake_all(&eq, eq_w, eq_h);
 
         let bg_h = engine.create_gpu_texture_f32("equirect", &eq, eq_w, eq_h)?;
         let diff_h = engine.create_gpu_texture_f32("diffuse_ibl", &diffuse, 32, 16)?;
