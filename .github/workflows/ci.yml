@@ -160,6 +160,9 @@ jobs:
         example:
           - examples/cube
           - examples/pill_tunel
+          - examples/pbr_helmet
+          - examples/pbr_balls
+          - examples/sponza
     steps:
       - uses: actions/checkout@v4
 
@@ -176,6 +179,8 @@ jobs:
           workspaces: |
             examples/cube/build/wasm/.build/pill_web -> target
             examples/pill_tunel/build/wasm/.build/pill_web -> target
+            examples/pbr_helmet/build/wasm/.build/pill_web -> target
+            examples/pbr_balls/build/wasm/.build/pill_web -> target
 
       - uses: jetli/wasm-pack-action@v0.4.0
         with:

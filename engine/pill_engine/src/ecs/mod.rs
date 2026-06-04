@@ -1,6 +1,7 @@
 #![cfg_attr(debug_assertions, allow(dead_code, unused_variables))]
 
 mod components;
+mod egui_client;
 mod entity;
 mod scene;
 mod scene_manager;
@@ -11,8 +12,8 @@ mod systems;
 // - Components
 
 pub use components::{
-    Component, ComponentDestroyer, ComponentStorage, ConcreteComponentDestroyer, GlobalComponent,
-    GlobalComponentStorage,
+    get_global_component_from, Component, ComponentDestroyer, ComponentStorage,
+    ConcreteComponentDestroyer, GlobalComponent, GlobalComponentStorage,
 };
 
 pub use components::camera_component::{
@@ -28,8 +29,13 @@ pub use components::audio_listener_component::AudioListenerComponent;
 #[cfg(not(target_arch = "wasm32"))]
 pub use components::audio_source_component::AudioSourceComponent;
 
-#[cfg(feature = "debug_ui")]
-pub use components::egui_manager_component::EguiManagerComponent;
+#[cfg(feature = "ui")]
+pub use components::egui_component::EguiComponent;
+
+pub use components::render_state_component::RenderStateComponent;
+
+#[cfg(feature = "ui")]
+pub use egui_client::EguiClient;
 
 pub use components::deferred_update_component::{
     DeferredUpdateComponent, DeferredUpdateComponentRequest, DeferredUpdateManagerPointer,
@@ -45,7 +51,8 @@ pub use components::transform_component::{
     get_model_matrix, get_normal_matrix, update_transform_matrices, TransformComponent,
 };
 
-pub use components::mesh_rendering_component::MeshRenderingComponent;
+pub use components::mesh_component::MeshComponent;
+pub use components::pbr_renderable_component::PbrRenderableComponent;
 
 pub use components::time_component::TimeComponent;
 
@@ -62,6 +69,9 @@ pub use components::network_state_component::{NetworkEntityState, NetworkStateCo
 pub use systems::{SystemFunction, SystemManager, UpdatePhase};
 
 pub use systems::rendering_system::rendering_system;
+
+#[cfg(feature = "ui")]
+pub use systems::egui_system::egui_system;
 
 pub use systems::deferred_update_system::deferred_update_system;
 

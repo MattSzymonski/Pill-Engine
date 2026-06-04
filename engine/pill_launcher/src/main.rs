@@ -188,6 +188,18 @@ pub(crate) fn modify_file<A: FnMut(String) -> String>(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn codesign_adhoc(path: &PathBuf) -> Result<()> {
+    let status = Command::new("codesign")
+        .args(["--force", "--sign", "-", path.to_str().unwrap_or("")])
+        .status()
+        .with_context(|| format!("codesign failed for {}", path.display()))?;
+    if !status.success() {
+        bail!("codesign returned non-zero for {}", path.display());
+    }
+    Ok(())
+}
+
 fn copy_if_newer(source: &PathBuf, destination: &PathBuf) -> Result<bool> {
     // returns true if copied
     if !source.exists() {
@@ -420,6 +432,48 @@ fn try_remove_files_starting_with(directory_path: &PathBuf, file_name_prefix: &s
     }
 }
 
+fn delete_cooked_files_recursive(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            delete_cooked_files_recursive(&path)?;
+        } else if file_type.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext == "cooked_mesh" || ext == "cooked_tex" {
+                fs::remove_file(&path)
+                    .with_context(|| format!("Failed to delete {}", path.display()))?;
+                println!("Deleted {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_asset_pipeline(res_dir: &Path, force_rebuild: bool) -> Result<()> {
+    if force_rebuild {
+        println!("Force-rebuild: deleting cooked files under {}...", res_dir.display());
+        delete_cooked_files_recursive(res_dir)?;
+    }
+    let pipeline = pill_assets::Pipeline {
+        root: res_dir.to_path_buf(),
+        rules: pill_assets::default_rules(),
+    };
+    let stats = pipeline.run().context("Asset pipeline failed")?;
+    println!(
+        "Assets: discovered={} rebuilt={} skipped={} (root: {})",
+        stats.discovered.len(),
+        stats.rebuilt.len(),
+        stats.skipped.len(),
+        res_dir.display()
+    );
+    Ok(())
+}
+
 // Render all *.puml under <crate>/docs/uml into <crate>/docs/uml_out as SVGs
 fn render_puml_for_crate(crate_dir: &Path) -> Result<()> {
     let in_dir = crate_dir.join("docs").join("uml");
@@ -461,7 +515,8 @@ fn render_puml_for_crate(crate_dir: &Path) -> Result<()> {
 
     // Prefer "plantuml" CLI tool if available
     if !have_cli {
-        bail!("Please install plantuml!");
+        println!("plantuml not found, skipping diagram rendering");
+        return Ok(());
     }
 
     for puml in &inputs {
@@ -898,11 +953,15 @@ fn build_game_project(
     if *compile_mode != CompileMode::HotReload || !hot_reload_child {
         if copy_if_newer(&game_src, &data_dir.join(dylib("pill_game")))? {
             println!("Copied game dylib");
+            #[cfg(target_os = "macos")]
+            codesign_adhoc(&data_dir.join(dylib("pill_game")))?;
         } else {
             println!("Skipping copying of game dylib");
         }
         if copy_if_newer(&runtime_src, &data_dir.join(dylib("pill_runtime")))? {
             println!("Copied runtime dylib");
+            #[cfg(target_os = "macos")]
+            codesign_adhoc(&data_dir.join(dylib("pill_runtime")))?;
         } else {
             println!("Skipping copying of runtime dylib");
         }
@@ -1177,6 +1236,12 @@ fn run_app() -> Result<()> {
         .required(false)
         .help("Fail WASM release build if final binary exceeds N KB");
 
+    let force_rebuild_option = Arg::with_name("force-rebuild")
+        .long("force-rebuild")
+        .takes_value(false)
+        .required(false)
+        .help("Delete all cooked asset files and rebuild from source. For 'assets': rebuild the pipeline. For 'run'/'build': rebuild assets then build.");
+
     let game_args = Arg::with_name("game-args")
         .help("Arguments passed through to cargo/game (use `--` to separate them)")
         .multiple(true)
@@ -1192,6 +1257,7 @@ fn run_app() -> Result<()> {
         .arg(compile_mode_option)
         .arg(target_option)
         .arg(max_wasm_size_option)
+        .arg(force_rebuild_option)
         .arg(game_args)
         .setting(AppSettings::TrailingVarArg);
 
@@ -1226,6 +1292,8 @@ fn run_app() -> Result<()> {
         .value_of("max-wasm-size")
         .and_then(|s| s.parse().ok());
 
+    let force_rebuild = matches.is_present("force-rebuild");
+
     match action_argument {
         "create" => {
             let game_parent_directory_path = PathBuf::from(directory_path_argument.expect("Game project parent directory path has to be specified using --path flag. For example: --path <PROJECT_DIR>"))
@@ -1240,6 +1308,11 @@ fn run_app() -> Result<()> {
             let game_project_directory_path = PathBuf::from(directory_path_argument.expect("Game project directory path has to be specified using --path flag. For example: --path <GAME_PROJECT_DIR>"))
                 .absolutize().context("Failed to absolutize game project directory path")?
                 .to_path_buf();
+
+            if force_rebuild {
+                run_asset_pipeline(&game_project_directory_path.join("res"), true)
+                    .context("Asset rebuild failed")?;
+            }
 
             match target {
                 BuildTarget::Native => {
@@ -1268,6 +1341,11 @@ fn run_app() -> Result<()> {
             let game_project_directory_path = PathBuf::from(directory_path_argument.expect("Game project directory path has to be specified using --path flag. For example: --path <GAME_PROJECT_DIR>"))
                 .absolutize().context("Failed to absolutize game project directory path")?
                 .to_path_buf();
+
+            if force_rebuild {
+                run_asset_pipeline(&game_project_directory_path.join("res"), true)
+                    .context("Asset rebuild failed")?;
+            }
 
             match target {
                 BuildTarget::Native => {
@@ -1326,18 +1404,8 @@ fn run_app() -> Result<()> {
             .context("Failed to absolutize project directory path")?
             .to_path_buf();
 
-            let pipeline = pill_assets::Pipeline {
-                root: project_dir.join("res"),
-                rules: pill_assets::default_rules(),
-            };
-            let stats = pipeline.run().context("Asset pipeline failed")?;
-            println!(
-                "Assets: discovered={} rebuilt={} skipped={} (root: {})",
-                stats.discovered.len(),
-                stats.rebuilt.len(),
-                stats.skipped.len(),
-                pipeline.root.display()
-            );
+            run_asset_pipeline(&project_dir.join("res"), force_rebuild)
+                .context("Asset pipeline failed")?;
         }
         _ => {
             println!("Undefined action");

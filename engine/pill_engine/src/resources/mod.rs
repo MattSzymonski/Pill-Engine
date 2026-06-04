@@ -1,5 +1,7 @@
 #![cfg_attr(debug_assertions, allow(dead_code, unused_imports, unused_variables))]
 
+#[cfg(feature = "gltf_loading")]
+mod gltf_scene;
 mod material;
 mod mesh;
 mod resource;
@@ -23,11 +25,16 @@ pub use sound::{Sound, SoundHandle};
 
 pub use mesh::{Mesh, MeshData, MeshHandle, MeshVertex};
 
+#[cfg(feature = "gltf_loading")]
+pub use gltf_scene::{
+    gltf_resource_uris, parse_gltf_scene, GltfMaterialData, GltfMeshData, GltfResourceUris,
+    GltfSceneData, GltfTextureData,
+};
+
 pub use texture::{Texture, TextureHandle, TextureType};
 
 pub use material::{
-    get_renderer_texture_handle_from_material_texture, Material, MaterialHandle, MaterialParameter,
-    MaterialTexture,
+    Material, MaterialHandle, MaterialParameter, MaterialTexture, PBRMaterial, PBRMaterialHandle,
 };
 
 pub use shader::{
