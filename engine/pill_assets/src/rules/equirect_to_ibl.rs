@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use super::studio_equirect::{linear_to_srgb, srgb_to_linear, write_rtex, write_rtex_hdr_mip};
+use super::procedural_equirect::{linear_to_srgb, srgb_to_linear, write_rtex, write_rtex_hdr_mip};
 use crate::Rule;
 
 pub struct EquirectToIBL;
@@ -26,30 +26,32 @@ impl Rule for EquirectToIBL {
 
     fn build(&self, input: &Path, output: &Path) -> Result<()> {
         let equirect = Equirect::load(input)?;
-        let dir = output.parent().unwrap();
+        let directory = output.parent().unwrap();
         let stem = input.file_stem().unwrap().to_str().unwrap();
         let base = stem.strip_suffix("_equirect").unwrap_or(stem);
 
         // 1. Diffuse irradiance (32×16 sRGB) — anchor output
-        let irr = compute_irradiance(&equirect, 32, 16);
-        write_rtex(output, 32, 16, &irr)?;
+        let irradiance = compute_irradiance(&equirect, 32, 16);
+        write_rtex(output, 32, 16, &irradiance)?;
 
         // 2. Specular prefilter HDR mip chain (RTEX v4, Rgba32Float).
         // 5 mip levels; mip i roughness = i/4, matching shader roughness * MAX_REFLECTION_LOD(4).
         const MIP_ROUGHNESS: [f32; 5] = [0.04, 0.25, 0.5, 0.75, 1.0];
-        let spec_path = dir.join(format!("{base}_specular_ibl.cooked_tex"));
-        let mut spec_mips: Vec<Vec<f32>> = Vec::with_capacity(5);
-        for (mip, &r) in MIP_ROUGHNESS.iter().enumerate() {
-            let w = (128u32 >> mip).max(1);
-            let h = (64u32 >> mip).max(1);
-            spec_mips.push(compute_specular_prefilter(&equirect, w, h, r));
+        let specular_path = directory.join(format!("{base}_specular_ibl.cooked_tex"));
+        let mut specular_mips: Vec<Vec<f32>> = Vec::with_capacity(5);
+        for (mip_level, &roughness) in MIP_ROUGHNESS.iter().enumerate() {
+            let width = (128u32 >> mip_level).max(1);
+            let height = (64u32 >> mip_level).max(1);
+            specular_mips.push(compute_specular_prefilter(
+                &equirect, width, height, roughness,
+            ));
         }
-        write_rtex_hdr_mip(&spec_path, 128, 64, &spec_mips)?;
+        write_rtex_hdr_mip(&specular_path, 128, 64, &specular_mips)?;
 
         // 3. BRDF LUT (256×256 linear) — split-sum preintegration, environment-independent
-        let lut = compute_brdf_lut(256, 256);
-        let lut_path = dir.join("brdf_lut.cooked_tex");
-        write_rtex(&lut_path, 256, 256, &lut)?;
+        let brdf_lut = compute_brdf_lut(256, 256);
+        let brdf_lut_path = directory.join("brdf_lut.cooked_tex");
+        write_rtex(&brdf_lut_path, 256, 256, &brdf_lut)?;
 
         Ok(())
     }
@@ -59,8 +61,8 @@ impl Rule for EquirectToIBL {
 
 struct Equirect {
     pixels: Vec<f32>, // flat RGBA f32 linear
-    w: u32,
-    h: u32,
+    width: u32,
+    height: u32,
 }
 
 impl Equirect {
@@ -70,96 +72,110 @@ impl Equirect {
             bail!("invalid RTEX in {path:?}");
         }
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
-        let w = u32::from_le_bytes(data[8..12].try_into().unwrap());
-        let h = u32::from_le_bytes(data[12..16].try_into().unwrap());
+        let width = u32::from_le_bytes(data[8..12].try_into().unwrap());
+        let height = u32::from_le_bytes(data[12..16].try_into().unwrap());
         let pixels = if version == 2 {
             // v2: Rgba32Float (4 bytes per channel, f32 LE)
             data[16..]
                 .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
                 .collect()
         } else {
             // v1: Rgba8UnormSrgb — decode to linear f32 at load time
             data[16..]
                 .iter()
-                .map(|&b| srgb_to_linear(b as f32 / 255.0))
+                .map(|&byte| srgb_to_linear(byte as f32 / 255.0))
                 .collect()
         };
-        Ok(Self { pixels, w, h })
+        Ok(Self {
+            pixels,
+            width,
+            height,
+        })
     }
 
     // Sample at a world-space direction; nearest-neighbor, returns linear HDR values.
-    fn sample(&self, dir: [f32; 3]) -> [f32; 3] {
-        let (u, v) = dir_to_equirect_uv(dir);
-        let x = ((u * self.w as f32) as u32).min(self.w - 1);
-        let y = ((v * self.h as f32) as u32).min(self.h - 1);
-        let i = ((y * self.w + x) * 4) as usize;
-        [self.pixels[i], self.pixels[i + 1], self.pixels[i + 2]]
+    fn sample(&self, direction: [f32; 3]) -> [f32; 3] {
+        let (u_coordinate, v_coordinate) = dir_to_equirect_uv(direction);
+        let x = ((u_coordinate * self.width as f32) as u32).min(self.width - 1);
+        let y = ((v_coordinate * self.height as f32) as u32).min(self.height - 1);
+        let pixel_index = ((y * self.width + x) * 4) as usize;
+        [
+            self.pixels[pixel_index],
+            self.pixels[pixel_index + 1],
+            self.pixels[pixel_index + 2],
+        ]
     }
 }
 
 // --- Coordinate helpers ---
 
-fn equirect_uv_to_dir(u: f32, v: f32) -> [f32; 3] {
-    let az = (u - 0.5) * 2.0 * PI; // consistent with dir_to_equirect_uv: u = 0.5 + az/(2π)
-    let elev = (0.5 - v) * PI;
-    let cos_e = elev.cos();
-    [cos_e * az.cos(), elev.sin(), cos_e * az.sin()]
+fn equirect_uv_to_dir(u_coordinate: f32, v_coordinate: f32) -> [f32; 3] {
+    let azimuth = (u_coordinate - 0.5) * 2.0 * PI; // consistent with dir_to_equirect_uv: u = 0.5 + azimuth/(2π)
+    let elevation = (0.5 - v_coordinate) * PI;
+    let cos_elevation = elevation.cos();
+    [
+        cos_elevation * azimuth.cos(),
+        elevation.sin(),
+        cos_elevation * azimuth.sin(),
+    ]
 }
 
-fn dir_to_equirect_uv(dir: [f32; 3]) -> (f32, f32) {
-    let [x, y, z] = normalize(dir);
-    let az = z.atan2(x);
-    let elev = y.clamp(-1.0, 1.0).asin();
-    let u = (0.5 + az / (2.0 * PI)).rem_euclid(1.0);
-    let v = (0.5 - elev / PI).clamp(0.0, 1.0);
-    (u, v)
+fn dir_to_equirect_uv(direction: [f32; 3]) -> (f32, f32) {
+    let [x, y, z] = normalize(direction);
+    let azimuth = z.atan2(x);
+    let elevation = y.clamp(-1.0, 1.0).asin();
+    let u_coordinate = (0.5 + azimuth / (2.0 * PI)).rem_euclid(1.0);
+    let v_coordinate = (0.5 - elevation / PI).clamp(0.0, 1.0);
+    (u_coordinate, v_coordinate)
 }
 
 // --- Vector math ---
 
-fn normalize(v: [f32; 3]) -> [f32; 3] {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-8);
-    [v[0] / len, v[1] / len, v[2] / len]
+fn normalize(vector: [f32; 3]) -> [f32; 3] {
+    let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2])
+        .sqrt()
+        .max(1e-8);
+    [vector[0] / length, vector[1] / length, vector[2] / length]
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
     ]
 }
 
-// Build an orthonormal tangent frame (t, b) from normal n.
-fn tangent_frame(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-    let up = if n[1].abs() < 0.9 {
+// Build an orthonormal tangent frame (tangent, bitangent) from normal.
+fn tangent_frame(normal: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let up = if normal[1].abs() < 0.9 {
         [0.0f32, 1.0, 0.0]
     } else {
         [1.0f32, 0.0, 0.0]
     };
-    let t = normalize(cross(up, n));
-    let b = cross(n, t);
-    (t, b)
+    let tangent = normalize(cross(up, normal));
+    let bitangent = cross(normal, tangent);
+    (tangent, bitangent)
 }
 
-// Transform v from tangent space (where n=[0,0,1]) to world space.
-fn tangent_to_world(v: [f32; 3], n: [f32; 3]) -> [f32; 3] {
-    let (t, b) = tangent_frame(n);
+// Transform vector from tangent space (where normal=[0,0,1]) to world space.
+fn tangent_to_world(vector: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+    let (tangent, bitangent) = tangent_frame(normal);
     normalize([
-        t[0] * v[0] + b[0] * v[1] + n[0] * v[2],
-        t[1] * v[0] + b[1] * v[1] + n[1] * v[2],
-        t[2] * v[0] + b[2] * v[1] + n[2] * v[2],
+        tangent[0] * vector[0] + bitangent[0] * vector[1] + normal[0] * vector[2],
+        tangent[1] * vector[0] + bitangent[1] * vector[1] + normal[1] * vector[2],
+        tangent[2] * vector[0] + bitangent[2] * vector[1] + normal[2] * vector[2],
     ])
 }
 
 // --- Hammersley quasi-random sequence ---
 
-fn radical_inverse_vdc(mut bits: u32) -> f32 {
+fn radical_inverse_van_der_corput(mut bits: u32) -> f32 {
     bits = bits.rotate_right(16);
     bits = ((bits & 0x5555_5555) << 1) | ((bits & 0xAAAA_AAAA) >> 1);
     bits = ((bits & 0x3333_3333) << 2) | ((bits & 0xCCCC_CCCC) >> 2);
@@ -168,171 +184,186 @@ fn radical_inverse_vdc(mut bits: u32) -> f32 {
     bits as f32 * 2.328_306_4e-10 // / 2^32
 }
 
-fn hammersley(i: u32, n: u32) -> (f32, f32) {
-    (i as f32 / n as f32, radical_inverse_vdc(i))
+fn hammersley(index: u32, count: u32) -> (f32, f32) {
+    (
+        index as f32 / count as f32,
+        radical_inverse_van_der_corput(index),
+    )
 }
 
-// GGX importance sampling: returns half-vector in world space around n.
-fn importance_sample_ggx(xi: (f32, f32), roughness: f32, n: [f32; 3]) -> [f32; 3] {
-    let a = roughness * roughness;
-    let phi = 2.0 * PI * xi.0;
-    let cos_t = ((1.0 - xi.1) / (1.0 + (a * a - 1.0) * xi.1))
+// GGX importance sampling: returns half-vector in world space around normal.
+fn importance_sample_ggx(sample_point: (f32, f32), roughness: f32, normal: [f32; 3]) -> [f32; 3] {
+    let alpha = roughness * roughness;
+    let phi = 2.0 * PI * sample_point.0;
+    let cos_theta = ((1.0 - sample_point.1) / (1.0 + (alpha * alpha - 1.0) * sample_point.1))
         .max(0.0)
         .sqrt();
-    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
-    let h_local = [sin_t * phi.cos(), sin_t * phi.sin(), cos_t];
-    tangent_to_world(h_local, n)
+    let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
+    let half_vector_local = [sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta];
+    tangent_to_world(half_vector_local, normal)
 }
 
 // --- Diffuse irradiance: cosine-weighted Riemann sum ---
 
-fn compute_irradiance(eq: &Equirect, out_w: u32, out_h: u32) -> Vec<u8> {
-    const N_PHI: u32 = 64;
-    const N_THETA: u32 = 32;
-    let dphi = 2.0 * PI / N_PHI as f32;
-    let dtheta = 0.5 * PI / N_THETA as f32;
+fn compute_irradiance(equirect: &Equirect, output_width: u32, output_height: u32) -> Vec<u8> {
+    const PHI_SAMPLE_COUNT: u32 = 64;
+    const THETA_SAMPLE_COUNT: u32 = 32;
+    let delta_phi = 2.0 * PI / PHI_SAMPLE_COUNT as f32;
+    let delta_theta = 0.5 * PI / THETA_SAMPLE_COUNT as f32;
 
-    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
-    for y in 0..out_h {
-        for x in 0..out_w {
-            let u = (x as f32 + 0.5) / out_w as f32;
-            let v = (y as f32 + 0.5) / out_h as f32;
-            let n = equirect_uv_to_dir(u, v);
+    let mut output = Vec::with_capacity((output_width * output_height * 4) as usize);
+    for y in 0..output_height {
+        for x in 0..output_width {
+            let u_coordinate = (x as f32 + 0.5) / output_width as f32;
+            let v_coordinate = (y as f32 + 0.5) / output_height as f32;
+            let normal = equirect_uv_to_dir(u_coordinate, v_coordinate);
 
-            let mut irr = [0.0f32; 3];
-            let mut wt = 0.0f32;
+            let mut irradiance = [0.0f32; 3];
+            let mut total_weight = 0.0f32;
 
-            for j in 0..N_THETA {
-                for i in 0..N_PHI {
-                    let phi = (i as f32 + 0.5) * dphi;
-                    let theta = (j as f32 + 0.5) * dtheta;
-                    let sin_t = theta.sin();
-                    let cos_t = theta.cos();
-                    let local = [sin_t * phi.cos(), sin_t * phi.sin(), cos_t];
-                    let world = tangent_to_world(local, n);
-                    let sample = eq.sample(world);
-                    let w = cos_t * sin_t;
-                    irr[0] += sample[0] * w;
-                    irr[1] += sample[1] * w;
-                    irr[2] += sample[2] * w;
-                    wt += w;
+            for theta_index in 0..THETA_SAMPLE_COUNT {
+                for phi_index in 0..PHI_SAMPLE_COUNT {
+                    let phi = (phi_index as f32 + 0.5) * delta_phi;
+                    let theta = (theta_index as f32 + 0.5) * delta_theta;
+                    let sin_theta = theta.sin();
+                    let cos_theta = theta.cos();
+                    let local = [sin_theta * phi.cos(), sin_theta * phi.sin(), cos_theta];
+                    let world = tangent_to_world(local, normal);
+                    let sample = equirect.sample(world);
+                    let weight = cos_theta * sin_theta;
+                    irradiance[0] += sample[0] * weight;
+                    irradiance[1] += sample[1] * weight;
+                    irradiance[2] += sample[2] * weight;
+                    total_weight += weight;
                 }
             }
 
-            let s = PI / wt;
-            out.push(linear_to_srgb(irr[0] * s));
-            out.push(linear_to_srgb(irr[1] * s));
-            out.push(linear_to_srgb(irr[2] * s));
-            out.push(255u8);
+            let normalization = PI / total_weight;
+            output.push(linear_to_srgb(irradiance[0] * normalization));
+            output.push(linear_to_srgb(irradiance[1] * normalization));
+            output.push(linear_to_srgb(irradiance[2] * normalization));
+            output.push(255u8);
         }
     }
-    out
+    output
 }
 
 // --- Specular prefilter: GGX importance sampling, HDR linear output ---
 
-fn compute_specular_prefilter(eq: &Equirect, out_w: u32, out_h: u32, roughness: f32) -> Vec<f32> {
-    const N_SAMPLES: u32 = 256;
+fn compute_specular_prefilter(
+    equirect: &Equirect,
+    output_width: u32,
+    output_height: u32,
+    roughness: f32,
+) -> Vec<f32> {
+    const SAMPLE_COUNT: u32 = 256;
 
-    let mut out = Vec::with_capacity((out_w * out_h * 4) as usize);
-    for y in 0..out_h {
-        for x in 0..out_w {
-            let u = (x as f32 + 0.5) / out_w as f32;
-            let v = (y as f32 + 0.5) / out_h as f32;
-            let n = equirect_uv_to_dir(u, v);
+    let mut output = Vec::with_capacity((output_width * output_height * 4) as usize);
+    for y in 0..output_height {
+        for x in 0..output_width {
+            let u_coordinate = (x as f32 + 0.5) / output_width as f32;
+            let v_coordinate = (y as f32 + 0.5) / output_height as f32;
+            let normal = equirect_uv_to_dir(u_coordinate, v_coordinate);
 
-            let mut col = [0.0f32; 3];
-            let mut wt = 0.0f32;
+            let mut color = [0.0f32; 3];
+            let mut total_weight = 0.0f32;
 
-            for i in 0..N_SAMPLES {
-                let xi = hammersley(i, N_SAMPLES);
-                let h = importance_sample_ggx(xi, roughness, n);
-                let vdoth = dot(n, h).max(0.0);
-                let l = normalize([
-                    2.0 * vdoth * h[0] - n[0],
-                    2.0 * vdoth * h[1] - n[1],
-                    2.0 * vdoth * h[2] - n[2],
+            for sample_index in 0..SAMPLE_COUNT {
+                let sample_point = hammersley(sample_index, SAMPLE_COUNT);
+                let half_vector = importance_sample_ggx(sample_point, roughness, normal);
+                let normal_dot_half = dot(normal, half_vector).max(0.0);
+                let light_direction = normalize([
+                    2.0 * normal_dot_half * half_vector[0] - normal[0],
+                    2.0 * normal_dot_half * half_vector[1] - normal[1],
+                    2.0 * normal_dot_half * half_vector[2] - normal[2],
                 ]);
-                let ndotl = dot(n, l).max(0.0);
-                if ndotl > 0.0 {
-                    let s = eq.sample(l);
-                    col[0] += s[0] * ndotl;
-                    col[1] += s[1] * ndotl;
-                    col[2] += s[2] * ndotl;
-                    wt += ndotl;
+                let normal_dot_light = dot(normal, light_direction).max(0.0);
+                if normal_dot_light > 0.0 {
+                    let sampled = equirect.sample(light_direction);
+                    color[0] += sampled[0] * normal_dot_light;
+                    color[1] += sampled[1] * normal_dot_light;
+                    color[2] += sampled[2] * normal_dot_light;
+                    total_weight += normal_dot_light;
                 }
             }
 
-            let s = 1.0 / wt.max(1e-6);
-            out.push(col[0] * s);
-            out.push(col[1] * s);
-            out.push(col[2] * s);
-            out.push(1.0f32);
+            let normalization = 1.0 / total_weight.max(1e-6);
+            output.push(color[0] * normalization);
+            output.push(color[1] * normalization);
+            output.push(color[2] * normalization);
+            output.push(1.0f32);
         }
     }
-    out
+    output
 }
 
 // --- BRDF LUT: GGX split-sum preintegration (Karis / UE4) ---
 // Stored linear (not sRGB): R = F0 scale, G = F0 bias.
 
-fn geometry_schlick_ggx_ibl(ndotv: f32, roughness: f32) -> f32 {
+fn geometry_schlick_ggx_ibl(normal_dot_view: f32, roughness: f32) -> f32 {
     let k = roughness * roughness / 2.0;
-    ndotv / (ndotv * (1.0 - k) + k)
+    normal_dot_view / (normal_dot_view * (1.0 - k) + k)
 }
 
-fn geometry_smith_ibl(ndotv: f32, ndotl: f32, roughness: f32) -> f32 {
-    geometry_schlick_ggx_ibl(ndotv, roughness) * geometry_schlick_ggx_ibl(ndotl, roughness)
+fn geometry_smith_ibl(normal_dot_view: f32, normal_dot_light: f32, roughness: f32) -> f32 {
+    geometry_schlick_ggx_ibl(normal_dot_view, roughness)
+        * geometry_schlick_ggx_ibl(normal_dot_light, roughness)
 }
 
-fn compute_brdf_lut(w: u32, h: u32) -> Vec<u8> {
-    const N: u32 = 1024;
+fn compute_brdf_lut(width: u32, height: u32) -> Vec<u8> {
+    const SAMPLE_COUNT: u32 = 1024;
 
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        for x in 0..w {
+    let mut output = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
             // x = NdotV (0=grazing, 1=normal incidence)
             // y = roughness (0=smooth, 1=rough) — y=0 is top of texture
-            let ndotv = (x as f32 + 0.5) / w as f32;
-            let roughness = (y as f32 + 0.5) / h as f32;
+            let normal_dot_view = (x as f32 + 0.5) / width as f32;
+            let roughness = (y as f32 + 0.5) / height as f32;
             let roughness = roughness.max(0.04);
 
-            let v = [(1.0 - ndotv * ndotv).max(0.0).sqrt(), 0.0f32, ndotv];
-            let n = [0.0f32, 0.0, 1.0];
+            let view_direction = [
+                (1.0 - normal_dot_view * normal_dot_view).max(0.0).sqrt(),
+                0.0f32,
+                normal_dot_view,
+            ];
+            let normal = [0.0f32, 0.0, 1.0];
 
             let mut scale = 0.0f32;
             let mut bias = 0.0f32;
 
-            for i in 0..N {
-                let xi = hammersley(i, N);
-                let h_v = importance_sample_ggx(xi, roughness, n);
-                let vdoth = dot(v, h_v).max(0.0);
-                let l = normalize([
-                    2.0 * vdoth * h_v[0] - v[0],
-                    2.0 * vdoth * h_v[1] - v[1],
-                    2.0 * vdoth * h_v[2] - v[2],
+            for sample_index in 0..SAMPLE_COUNT {
+                let sample_point = hammersley(sample_index, SAMPLE_COUNT);
+                let half_vector = importance_sample_ggx(sample_point, roughness, normal);
+                let view_dot_half = dot(view_direction, half_vector).max(0.0);
+                let light_direction = normalize([
+                    2.0 * view_dot_half * half_vector[0] - view_direction[0],
+                    2.0 * view_dot_half * half_vector[1] - view_direction[1],
+                    2.0 * view_dot_half * half_vector[2] - view_direction[2],
                 ]);
-                let ndotl = l[2].max(0.0); // n = [0,0,1]
-                let ndoth = h_v[2].max(0.0);
+                let normal_dot_light = light_direction[2].max(0.0); // normal = [0,0,1]
+                let normal_dot_half = half_vector[2].max(0.0);
 
-                if ndotl > 0.0 {
-                    let g_vis = geometry_smith_ibl(ndotv, ndotl, roughness) * vdoth
-                        / (ndoth * ndotv.max(0.001));
-                    let fc = (1.0 - vdoth).powi(5);
-                    scale += (1.0 - fc) * g_vis;
-                    bias += fc * g_vis;
+                if normal_dot_light > 0.0 {
+                    let geometry_visibility =
+                        geometry_smith_ibl(normal_dot_view, normal_dot_light, roughness)
+                            * view_dot_half
+                            / (normal_dot_half * normal_dot_view.max(0.001));
+                    let fresnel_coefficient = (1.0 - view_dot_half).powi(5);
+                    scale += (1.0 - fresnel_coefficient) * geometry_visibility;
+                    bias += fresnel_coefficient * geometry_visibility;
                 }
             }
 
-            scale = (scale / N as f32).clamp(0.0, 1.0);
-            bias = (bias / N as f32).clamp(0.0, 1.0);
+            scale = (scale / SAMPLE_COUNT as f32).clamp(0.0, 1.0);
+            bias = (bias / SAMPLE_COUNT as f32).clamp(0.0, 1.0);
 
             // Linear bytes (not sRGB — BRDF coefficients are in linear space)
-            out.push((scale * 255.0 + 0.5) as u8);
-            out.push((bias * 255.0 + 0.5) as u8);
-            out.push(0u8);
-            out.push(255u8);
+            output.push((scale * 255.0 + 0.5) as u8);
+            output.push((bias * 255.0 + 0.5) as u8);
+            output.push(0u8);
+            output.push(255u8);
         }
     }
-    out
+    output
 }

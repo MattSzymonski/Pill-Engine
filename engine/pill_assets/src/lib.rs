@@ -21,7 +21,7 @@ pub mod rules;
 
 pub use rules::{
     default_rules, EquirectToIBL, GlbToCookedMesh, HlslToWgsl, ObjToCookedMesh, PngToCookedTex,
-    StudioEquirect,
+    ProceduralEquirect,
 };
 
 pub trait Rule {

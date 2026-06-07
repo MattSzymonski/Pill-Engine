@@ -41,7 +41,7 @@ impl Rule for GlbToCookedMesh {
 
     fn build(&self, input: &Path, output: &Path) -> Result<()> {
         let bytes = std::fs::read(input).with_context(|| format!("read {input:?}"))?;
-        let (doc, buffers, images) =
+        let (document, buffers, images) =
             gltf::import_slice(&bytes).with_context(|| format!("parse GLB {input:?}"))?;
 
         // --- Mesh ---
@@ -61,24 +61,26 @@ impl Rule for GlbToCookedMesh {
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0f32],
         ];
-        let default_scene = doc.default_scene().or_else(|| doc.scenes().next());
+        let default_scene = document
+            .default_scene()
+            .or_else(|| document.scenes().next());
         if let Some(scene) = default_scene {
             let mut stack: Vec<(gltf::Node, [[f32; 4]; 4])> =
-                scene.nodes().map(|n| (n, identity)).collect();
+                scene.nodes().map(|node| (node, identity)).collect();
             while let Some((node, parent_transform)) = stack.pop() {
-                let local = node_transform(node.transform());
-                let world = mat4_mul(parent_transform, local);
+                let local_transform = node_transform(node.transform());
+                let world_transform = mat4_mul(parent_transform, local_transform);
                 if let Some(mesh) = node.mesh() {
-                    mesh_instances.push((mesh.index(), world));
+                    mesh_instances.push((mesh.index(), world_transform));
                 }
                 for child in node.children() {
-                    stack.push((child, world));
+                    stack.push((child, world_transform));
                 }
             }
         } else {
             // No scene: fall back to processing every mesh with identity transform.
-            for (i, _) in doc.meshes().enumerate() {
-                mesh_instances.push((i, identity));
+            for (mesh_index, _) in document.meshes().enumerate() {
+                mesh_instances.push((mesh_index, identity));
             }
         }
 
@@ -86,11 +88,11 @@ impl Rule for GlbToCookedMesh {
             anyhow::bail!("{input:?}: no meshes in GLB");
         }
 
-        let meshes: Vec<gltf::Mesh> = doc.meshes().collect();
-        for (mesh_idx, world) in mesh_instances {
-            let mesh = &meshes[mesh_idx];
-            for prim in mesh.primitives() {
-                let reader = prim.reader(|buffer| Some(&*buffers[buffer.index()]));
+        let meshes: Vec<gltf::Mesh> = document.meshes().collect();
+        for (mesh_index, world_transform) in mesh_instances {
+            let mesh = &meshes[mesh_index];
+            for primitive in mesh.primitives() {
+                let reader = primitive.reader(|buffer| Some(&*buffers[buffer.index()]));
                 let vertex_offset = all_vertices.len() as u32;
 
                 let positions: Vec<[f32; 3]> = reader
@@ -101,61 +103,65 @@ impl Rule for GlbToCookedMesh {
                     .read_normals()
                     .with_context(|| format!("{input:?}: missing normals"))?
                     .collect();
-                let uvs: Vec<[f32; 2]> = reader
+                let texture_coordinates: Vec<[f32; 2]> = reader
                     .read_tex_coords(0)
                     .with_context(|| format!("{input:?}: missing UV set 0"))?
                     .into_f32()
                     .collect();
-                let tangents_glb: Vec<[f32; 4]> = reader
+                let glb_tangents: Vec<[f32; 4]> = reader
                     .read_tangents()
                     .map(|tangents_iter| tangents_iter.collect())
                     .unwrap_or_default();
-                let prim_indices: Vec<u32> = reader
+                let primitive_indices: Vec<u32> = reader
                     .read_indices()
                     .with_context(|| format!("{input:?}: missing indices"))?
                     .into_u32()
                     .collect();
 
                 let mut vertices: Vec<Vertex> = (0..positions.len())
-                    .map(|i| {
-                        let n = transform_normal(world, normals[i]);
-                        let (tx, ty, tz, sign) = tangents_glb
-                            .get(i)
+                    .map(|vertex_index| {
+                        let normal = transform_normal(world_transform, normals[vertex_index]);
+                        let (tangent_x, tangent_y, tangent_z, sign) = glb_tangents
+                            .get(vertex_index)
                             .map(|tangent| (tangent[0], tangent[1], tangent[2], tangent[3]))
                             .unwrap_or((1.0, 0.0, 0.0, 1.0));
-                        let t_world = transform_normal(world, [tx, ty, tz]);
-                        let bx = (n[1] * t_world[2] - n[2] * t_world[1]) * sign;
-                        let by = (n[2] * t_world[0] - n[0] * t_world[2]) * sign;
-                        let bz = (n[0] * t_world[1] - n[1] * t_world[0]) * sign;
+                        let tangent_world =
+                            transform_normal(world_transform, [tangent_x, tangent_y, tangent_z]);
+                        let bitangent_x =
+                            (normal[1] * tangent_world[2] - normal[2] * tangent_world[1]) * sign;
+                        let bitangent_y =
+                            (normal[2] * tangent_world[0] - normal[0] * tangent_world[2]) * sign;
+                        let bitangent_z =
+                            (normal[0] * tangent_world[1] - normal[1] * tangent_world[0]) * sign;
                         Vertex {
-                            position: transform_point(world, positions[i]),
-                            texture_coordinates: uvs[i],
-                            normal: n,
-                            tangent: t_world,
-                            bitangent: [bx, by, bz],
+                            position: transform_point(world_transform, positions[vertex_index]),
+                            texture_coordinates: texture_coordinates[vertex_index],
+                            normal,
+                            tangent: tangent_world,
+                            bitangent: [bitangent_x, bitangent_y, bitangent_z],
                         }
                     })
                     .collect();
 
-                if tangents_glb.is_empty() {
-                    compute_tangents(&mut vertices, &prim_indices);
+                if glb_tangents.is_empty() {
+                    compute_tangents(&mut vertices, &primitive_indices);
                 }
 
-                all_indices.extend(prim_indices.iter().map(|&i| i + vertex_offset));
+                all_indices.extend(primitive_indices.iter().map(|&index| index + vertex_offset));
                 all_vertices.extend(vertices);
             }
         }
 
         let vertex_bytes: &[u8] = bytemuck::cast_slice(&all_vertices);
         let index_bytes: &[u8] = bytemuck::cast_slice(&all_indices);
-        let mut out = Vec::with_capacity(16 + vertex_bytes.len() + index_bytes.len());
-        out.extend_from_slice(b"RMSH");
-        out.extend_from_slice(&1u32.to_le_bytes());
-        out.extend_from_slice(&(all_vertices.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(all_indices.len() as u32).to_le_bytes());
-        out.extend_from_slice(vertex_bytes);
-        out.extend_from_slice(index_bytes);
-        std::fs::write(output, &out).with_context(|| format!("write {output:?}"))?;
+        let mut output_bytes = Vec::with_capacity(16 + vertex_bytes.len() + index_bytes.len());
+        output_bytes.extend_from_slice(b"RMSH");
+        output_bytes.extend_from_slice(&1u32.to_le_bytes());
+        output_bytes.extend_from_slice(&(all_vertices.len() as u32).to_le_bytes());
+        output_bytes.extend_from_slice(&(all_indices.len() as u32).to_le_bytes());
+        output_bytes.extend_from_slice(vertex_bytes);
+        output_bytes.extend_from_slice(index_bytes);
+        std::fs::write(output, &output_bytes).with_context(|| format!("write {output:?}"))?;
 
         // --- Textures (side outputs) ---
 
@@ -164,52 +170,52 @@ impl Rule for GlbToCookedMesh {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let dir = output
+        let directory = output
             .parent()
             .with_context(|| "output has no parent directory")?;
 
-        for mat in doc.materials() {
-            let mat_idx = mat.index();
+        for material in document.materials() {
+            let material_index = material.index();
             let suffix = |base: &str| -> String {
-                match mat_idx {
+                match material_index {
                     None | Some(0) => format!("{stem}_{base}.cooked_tex"),
-                    Some(i) => format!("{stem}_mat{i}_{base}.cooked_tex"),
+                    Some(index) => format!("{stem}_mat{index}_{base}.cooked_tex"),
                 }
             };
-            let pbr = mat.pbr_metallic_roughness();
+            let pbr_metallic_roughness = material.pbr_metallic_roughness();
 
-            if let Some(info) = pbr.base_color_texture() {
+            if let Some(info) = pbr_metallic_roughness.base_color_texture() {
                 write_cooked_tex(
                     &images,
                     info.texture().source().index(),
-                    dir.join(suffix("albedo")),
+                    directory.join(suffix("albedo")),
                     "base color texture",
                     input,
                 )?;
             }
-            if let Some(info) = mat.normal_texture() {
+            if let Some(info) = material.normal_texture() {
                 write_cooked_tex(
                     &images,
                     info.texture().source().index(),
-                    dir.join(suffix("normal")),
+                    directory.join(suffix("normal")),
                     "normal texture",
                     input,
                 )?;
             }
-            if let Some(info) = pbr.metallic_roughness_texture() {
+            if let Some(info) = pbr_metallic_roughness.metallic_roughness_texture() {
                 write_cooked_tex(
                     &images,
                     info.texture().source().index(),
-                    dir.join(suffix("metallic_roughness")),
+                    directory.join(suffix("metallic_roughness")),
                     "metallic_roughness texture",
                     input,
                 )?;
             }
-            if let Some(info) = mat.emissive_texture() {
+            if let Some(info) = material.emissive_texture() {
                 write_cooked_tex(
                     &images,
                     info.texture().source().index(),
-                    dir.join(suffix("emissive")),
+                    directory.join(suffix("emissive")),
                     "emissive texture",
                     input,
                 )?;
@@ -222,20 +228,21 @@ impl Rule for GlbToCookedMesh {
 
 fn write_cooked_tex(
     images: &[gltf::image::Data],
-    img_idx: usize,
+    image_index: usize,
     path: std::path::PathBuf,
     label: &str,
     input: &Path,
 ) -> Result<()> {
     use gltf::image::Format;
     use std::borrow::Cow;
-    let Some(img) = images.get(img_idx) else {
+    let Some(image) = images.get(image_index) else {
         return Ok(());
     };
-    let rgba: Cow<[u8]> = match img.format {
-        Format::R8G8B8A8 => Cow::Borrowed(&img.pixels),
+    let rgba: Cow<[u8]> = match image.format {
+        Format::R8G8B8A8 => Cow::Borrowed(&image.pixels),
         Format::R8G8B8 => Cow::Owned(
-            img.pixels
+            image
+                .pixels
                 .chunks_exact(3)
                 .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255u8])
                 .collect(),
@@ -243,108 +250,128 @@ fn write_cooked_tex(
         format => bail!("{input:?}: {label}: unsupported GLB image format: {format:?}"),
     };
     // glTF UV origin (0,0) is top-left, matching wgpu/Vulkan — no row flip needed.
-    super::studio_equirect::write_rtex(&path, img.width, img.height, &rgba)
+    super::procedural_equirect::write_rtex(&path, image.width, image.height, &rgba)
         .with_context(|| format!("{input:?}: {label}"))
 }
 
 fn compute_tangents(vertices: &mut [Vertex], indices: &[u32]) {
     let mut triangle_counts = vec![0usize; vertices.len()];
 
-    for tri in indices.chunks(3) {
-        let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        let p0 = vertices[i0].position;
-        let p1 = vertices[i1].position;
-        let p2 = vertices[i2].position;
-        let uv0 = vertices[i0].texture_coordinates;
-        let uv1 = vertices[i1].texture_coordinates;
-        let uv2 = vertices[i2].texture_coordinates;
+    for triangle in indices.chunks(3) {
+        let (index_0, index_1, index_2) = (
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        );
+        let position_0 = vertices[index_0].position;
+        let position_1 = vertices[index_1].position;
+        let position_2 = vertices[index_2].position;
+        let texture_coordinates_0 = vertices[index_0].texture_coordinates;
+        let texture_coordinates_1 = vertices[index_1].texture_coordinates;
+        let texture_coordinates_2 = vertices[index_2].texture_coordinates;
 
-        let dp1 = sub3(p1, p0);
-        let dp2 = sub3(p2, p0);
-        let duv1 = sub2(uv1, uv0);
-        let duv2 = sub2(uv2, uv0);
+        let delta_position_1 = sub3(position_1, position_0);
+        let delta_position_2 = sub3(position_2, position_0);
+        let delta_texture_coordinates_1 = sub2(texture_coordinates_1, texture_coordinates_0);
+        let delta_texture_coordinates_2 = sub2(texture_coordinates_2, texture_coordinates_0);
 
-        let det = duv1[0] * duv2[1] - duv1[1] * duv2[0];
-        if det.abs() < 1e-8 {
+        let determinant = delta_texture_coordinates_1[0] * delta_texture_coordinates_2[1]
+            - delta_texture_coordinates_1[1] * delta_texture_coordinates_2[0];
+        if determinant.abs() < 1e-8 {
             continue;
         }
-        let inv = 1.0 / det;
-        let tangent = scale3(sub3(scale3(dp1, duv2[1]), scale3(dp2, duv1[1])), inv);
-        let bitangent = scale3(sub3(scale3(dp2, duv1[0]), scale3(dp1, duv2[0])), inv);
+        let inverse_determinant = 1.0 / determinant;
+        let tangent = scale3(
+            sub3(
+                scale3(delta_position_1, delta_texture_coordinates_2[1]),
+                scale3(delta_position_2, delta_texture_coordinates_1[1]),
+            ),
+            inverse_determinant,
+        );
+        let bitangent = scale3(
+            sub3(
+                scale3(delta_position_2, delta_texture_coordinates_1[0]),
+                scale3(delta_position_1, delta_texture_coordinates_2[0]),
+            ),
+            inverse_determinant,
+        );
 
-        for &i in &[i0, i1, i2] {
-            vertices[i].tangent = add3(vertices[i].tangent, tangent);
-            vertices[i].bitangent = add3(vertices[i].bitangent, bitangent);
-            triangle_counts[i] += 1;
+        for &index in &[index_0, index_1, index_2] {
+            vertices[index].tangent = add3(vertices[index].tangent, tangent);
+            vertices[index].bitangent = add3(vertices[index].bitangent, bitangent);
+            triangle_counts[index] += 1;
         }
     }
 
-    for (i, &count) in triangle_counts.iter().enumerate() {
+    for (index, &count) in triangle_counts.iter().enumerate() {
         if count > 0 {
-            let inv = 1.0 / count as f32;
-            vertices[i].tangent = normalize3(scale3(vertices[i].tangent, inv));
-            vertices[i].bitangent = normalize3(scale3(vertices[i].bitangent, inv));
+            let inverse_count = 1.0 / count as f32;
+            vertices[index].tangent = normalize3(scale3(vertices[index].tangent, inverse_count));
+            vertices[index].bitangent =
+                normalize3(scale3(vertices[index].bitangent, inverse_count));
         }
     }
 }
 
-fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+fn sub3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
 }
-fn sub2(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
-    [a[0] - b[0], a[1] - b[1]]
+fn sub2(left: [f32; 2], right: [f32; 2]) -> [f32; 2] {
+    [left[0] - right[0], left[1] - right[1]]
 }
-fn scale3(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
+fn scale3(vector: [f32; 3], scalar: f32) -> [f32; 3] {
+    [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar]
 }
-fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+fn add3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
 }
-fn normalize3(a: [f32; 3]) -> [f32; 3] {
-    let len = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
-    if len < 1e-10 {
-        a
+fn normalize3(vector: [f32; 3]) -> [f32; 3] {
+    let length = (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt();
+    if length < 1e-10 {
+        vector
     } else {
-        [a[0] / len, a[1] / len, a[2] / len]
+        [vector[0] / length, vector[1] / length, vector[2] / length]
     }
 }
 
-fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut c = [[0.0f32; 4]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            c[i][j] = (0..4).map(|k| a[i][k] * b[k][j]).sum();
+fn mat4_mul(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut result = [[0.0f32; 4]; 4];
+    for row in 0..4 {
+        for column in 0..4 {
+            result[row][column] = (0..4)
+                .map(|inner| left[row][inner] * right[inner][column])
+                .sum();
         }
     }
-    c
+    result
 }
 
-fn node_transform(t: gltf::scene::Transform) -> [[f32; 4]; 4] {
-    let m = t.matrix();
+fn node_transform(transform: gltf::scene::Transform) -> [[f32; 4]; 4] {
+    let matrix = transform.matrix();
     // gltf gives column-major; convert to row-major [[f32;4];4]
     [
-        [m[0][0], m[1][0], m[2][0], m[3][0]],
-        [m[0][1], m[1][1], m[2][1], m[3][1]],
-        [m[0][2], m[1][2], m[2][2], m[3][2]],
-        [m[0][3], m[1][3], m[2][3], m[3][3]],
+        [matrix[0][0], matrix[1][0], matrix[2][0], matrix[3][0]],
+        [matrix[0][1], matrix[1][1], matrix[2][1], matrix[3][1]],
+        [matrix[0][2], matrix[1][2], matrix[2][2], matrix[3][2]],
+        [matrix[0][3], matrix[1][3], matrix[2][3], matrix[3][3]],
     ]
 }
 
-fn transform_point(m: [[f32; 4]; 4], p: [f32; 3]) -> [f32; 3] {
+fn transform_point(matrix: [[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
     [
-        m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2] + m[0][3],
-        m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2] + m[1][3],
-        m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3],
+        matrix[0][0] * point[0] + matrix[0][1] * point[1] + matrix[0][2] * point[2] + matrix[0][3],
+        matrix[1][0] * point[0] + matrix[1][1] * point[1] + matrix[1][2] * point[2] + matrix[1][3],
+        matrix[2][0] * point[0] + matrix[2][1] * point[1] + matrix[2][2] * point[2] + matrix[2][3],
     ]
 }
 
-fn transform_normal(m: [[f32; 4]; 4], n: [f32; 3]) -> [f32; 3] {
+fn transform_normal(matrix: [[f32; 4]; 4], normal: [f32; 3]) -> [f32; 3] {
     // Normals transform by the inverse-transpose of the upper-left 3x3.
     // For uniform or orthogonal scaling this equals the 3x3 itself (re-normalized).
-    let r = [
-        m[0][0] * n[0] + m[0][1] * n[1] + m[0][2] * n[2],
-        m[1][0] * n[0] + m[1][1] * n[1] + m[1][2] * n[2],
-        m[2][0] * n[0] + m[2][1] * n[1] + m[2][2] * n[2],
+    let transformed = [
+        matrix[0][0] * normal[0] + matrix[0][1] * normal[1] + matrix[0][2] * normal[2],
+        matrix[1][0] * normal[0] + matrix[1][1] * normal[1] + matrix[1][2] * normal[2],
+        matrix[2][0] * normal[0] + matrix[2][1] * normal[1] + matrix[2][2] * normal[2],
     ];
-    normalize3(r)
+    normalize3(transformed)
 }

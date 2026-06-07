@@ -12,20 +12,26 @@ pub struct Game {}
 
 impl PillGame for Game {
     fn start(&self, engine: &mut Engine) -> Result<()> {
-        let (eq, eq_w, eq_h) = bake::generate();
-        let (diffuse, specular_mips, brdf_lut) = bake::bake_all(&eq, eq_w, eq_h);
+        let (equirect, equirect_width, equirect_height) = bake::generate();
+        let (diffuse, specular_mips, brdf_lut) =
+            bake::bake_all(&equirect, equirect_width, equirect_height);
 
-        let bg_h = engine.create_gpu_texture_f32("equirect", &eq, eq_w, eq_h)?;
-        let diff_h = engine.create_gpu_texture_f32("diffuse_ibl", &diffuse, 32, 16)?;
-        let spec_h =
+        let background_handle = engine.create_gpu_texture_f32(
+            "equirect",
+            &equirect,
+            equirect_width,
+            equirect_height,
+        )?;
+        let diffuse_handle = engine.create_gpu_texture_f32("diffuse_ibl", &diffuse, 32, 16)?;
+        let specular_handle =
             engine.create_gpu_mipped_texture_f32("specular_ibl", &specular_mips, 128, 64)?;
-        let lut_h = engine.create_gpu_texture_f32("brdf_lut", &brdf_lut, 256, 256)?;
+        let brdf_lut_handle = engine.create_gpu_texture_f32("brdf_lut", &brdf_lut, 256, 256)?;
 
-        let rs = engine.get_global_component_mut::<RenderStateComponent>()?;
-        rs.background = bg_h;
-        rs.ibl_diffuse = diff_h;
-        rs.ibl_specular = spec_h;
-        rs.ibl_brdf_lut = lut_h;
+        let render_state = engine.get_global_component_mut::<RenderStateComponent>()?;
+        render_state.background = background_handle;
+        render_state.ibl_diffuse = diffuse_handle;
+        render_state.ibl_specular = specular_handle;
+        render_state.ibl_brdf_lut = brdf_lut_handle;
 
         let scene = engine.create_scene("pbr_balls")?;
         engine.set_active_scene(scene)?;
@@ -48,16 +54,16 @@ impl PillGame for Game {
             include_bytes!("../res/models/MetalRoughSpheres_albedo.cooked_tex"),
         ))?;
 
-        let mr_handle = engine.add_resource(Texture::from_bytes(
-            "spheres_mr",
+        let metallic_roughness_handle = engine.add_resource(Texture::from_bytes(
+            "spheres_metallic_roughness",
             TextureType::MetallicRoughness,
             include_bytes!("../res/models/MetalRoughSpheres_metallic_roughness.cooked_tex"),
         ))?;
 
-        let mat_handle = engine.add_resource(
+        let material_handle = engine.add_resource(
             PBRMaterial::new("spheres_mat")
                 .albedo_texture(albedo_handle)
-                .metallic_roughness_texture(mr_handle)
+                .metallic_roughness_texture(metallic_roughness_handle)
                 .metallic(1.0)
                 .roughness(1.0),
         )?;
@@ -68,7 +74,7 @@ impl PillGame for Game {
             .with_component(
                 PbrRenderableComponent::builder()
                     .mesh(&mesh_handle)
-                    .pbr_material(&mat_handle)
+                    .pbr_material(&material_handle)
                     .build(),
             )
             .build();
@@ -103,21 +109,23 @@ fn orbit_camera_system(engine: &mut Engine) -> Result<()> {
     let input = engine.get_global_component_mut::<InputComponent>()?;
     let mouse_delta = input.get_mouse_delta();
     let scroll_delta = input.get_mouse_scroll_delta();
-    let lmb = input.get_mouse_button(MouseButton::Left);
+    let left_mouse_button = input.get_mouse_button(MouseButton::Left);
 
-    for (_, tfm, orbit) in engine.iterate_two_components_mut::<TransformComponent, OrbitCamera>()? {
-        if lmb {
+    for (_, transform, orbit) in
+        engine.iterate_two_components_mut::<TransformComponent, OrbitCamera>()?
+    {
+        if left_mouse_button {
             orbit.yaw -= mouse_delta.x * 0.3;
             orbit.pitch = (orbit.pitch + mouse_delta.y * 0.3).clamp(-70.0, 70.0);
         }
         orbit.radius = (orbit.radius - scroll_delta.y * 0.5).clamp(1.0, 50.0);
 
-        let pr = orbit.pitch.to_radians();
-        let yr = orbit.yaw.to_radians();
-        tfm.set_position(Vector3f::new(
-            orbit.radius * pr.cos() * yr.sin(),
-            orbit.radius * pr.sin(),
-            orbit.radius * pr.cos() * yr.cos(),
+        let pitch_radians = orbit.pitch.to_radians();
+        let yaw_radians = orbit.yaw.to_radians();
+        transform.set_position(Vector3f::new(
+            orbit.radius * pitch_radians.cos() * yaw_radians.sin(),
+            orbit.radius * pitch_radians.sin(),
+            orbit.radius * pitch_radians.cos() * yaw_radians.cos(),
         ));
     }
     Ok(())

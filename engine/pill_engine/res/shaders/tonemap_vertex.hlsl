@@ -1,16 +1,16 @@
-struct VOut {
-    float4 pos : SV_Position;
-    float2 uv  : TEXCOORD0;
+struct VertexOutput {
+    float4 sv_position         : SV_Position;
+    float2 texture_coordinates : TEXCOORD0;
 };
 
-VOut vs_main(uint vi : SV_VertexID) {
-    float2 p[3] = {
+VertexOutput vs_main(uint vertex_id : SV_VertexID) {
+    float2 positions[3] = {
         float2(-1.0, -3.0),
         float2( 3.0,  1.0),
         float2(-1.0,  1.0)
     };
-    VOut o;
-    o.pos = float4(p[vi], 0.0, 1.0);
-    o.uv  = float2(p[vi].x * 0.5 + 0.5, -p[vi].y * 0.5 + 0.5);
-    return o;
+    VertexOutput output;
+    output.sv_position         = float4(positions[vertex_id], 0.0, 1.0);
+    output.texture_coordinates = float2(positions[vertex_id].x * 0.5 + 0.5, -positions[vertex_id].y * 0.5 + 0.5);
+    return output;
 }
