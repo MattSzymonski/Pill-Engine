@@ -1,0 +1,72 @@
+# Pill CI Pipeline - example builds (all native + standalone)
+#
+# Builds every example project in the repo (native + standalone crates).
+# Native examples run in the pre-built pill-ci container (which includes
+# PillLauncher, Rust toolchain, and WASM tooling). WASM builds are covered
+# by ci-basic-tests.yml.
+# Runs on daily schedule and manual trigger.
+
+name: CI Compile Examples
+
+on:
+  schedule:
+    # Every day at 03:30 UTC (staggered after ci-basic daily)
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  packages: read
+
+env:
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ------------------------------------------------------------------
+  # Native example builds (matrix - each example in parallel)
+  # ------------------------------------------------------------------
+  build_native_examples:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - examples/cube
+          - examples/floating_pills
+          - examples/italian_brainrot
+          - examples/city
+          - examples/empty
+          - examples/pill_tunel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            engine -> target
+            ${{ matrix.example }} -> target
+      - name: Build ${{ matrix.example }}
+        run: bash devops/tests/run_examples_tests.sh "${{ matrix.example }}"
+
+  # ------------------------------------------------------------------
+  # Standalone crates (no PillLauncher needed)
+  # ------------------------------------------------------------------
+  build_standalone:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - examples/net_minimal/client
+          - examples/net_minimal/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with: { toolchain: stable }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ${{ matrix.crate }} -> target
+      - name: Build ${{ matrix.crate }}
+        run: cargo build --manifest-path ${{ matrix.crate }}/Cargo.toml

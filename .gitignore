@@ -4,6 +4,7 @@ build/
 .vscode/
 *.lock
 
+/docs
 docs/*
 engine/pill_engine/docs/uml_out/*
 engine/target_*
@@ -12,3 +13,15 @@ engine/target_*
 *.wgsl
 *.cooked_mesh
 *.cooked_tex
+DamagedHelmet.glb
+MetalRoughSpheres.glb
+studio_small_08.hdr
+
+/.github/skills
+/temp
+*.blend1
+
+.claude/
+
+graphify-out/
+.github/copilot-instructions.md

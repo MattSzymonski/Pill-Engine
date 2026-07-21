@@ -1,0 +1,92 @@
+# Pill CI Pipeline - launcher action validation
+#
+# Quick suite: smoke tests (basics, create, cargo, assets).
+# Full suite: heavier actions (build, run, docs).
+# Runs on daily schedule and manual trigger.
+
+name: CI Pill Launcher Tests
+
+on:
+  schedule:
+    # Every day at 03:30 UTC (staggered after ci-basic daily)
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  packages: read
+
+env:
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ------------------------------------------------------------------
+  # Build the launcher once, upload as artifact for all downstream jobs
+  # ------------------------------------------------------------------
+  build_launcher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            engine -> target
+      - name: Build PillLauncher (release)
+        run: cargo build --release --manifest-path engine/pill_launcher/Cargo.toml
+      - name: Upload PillLauncher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilllauncher-linux
+          path: engine/pill_launcher/target/release/PillLauncher
+
+  # ------------------------------------------------------------------
+  # Quick suite - basic smoke tests + cube build
+  # ------------------------------------------------------------------
+  quick_suite:
+    runs-on: ubuntu-latest
+    needs: build_launcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            engine -> target
+            examples/cube -> target
+      - uses: actions/download-artifact@v4
+        with:
+          {
+            name: pilllauncher-linux,
+            path: engine/pill_launcher/target/release,
+          }
+      - name: Quick suite (smoke tests)
+        run: bash devops/tests/run_pill_launcher_tests.sh basics create cargo assets
+
+  # ------------------------------------------------------------------
+  # Full suite - launcher build + run + docs tests
+  # ------------------------------------------------------------------
+  full_suite:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    needs: build_launcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            engine -> target
+            examples/cube -> target
+            examples/city -> target
+            examples/floating_pills -> target
+            examples/italian_brainrot -> target
+            examples/cube/build/wasm/.build/pill_web -> target
+      - uses: actions/download-artifact@v4
+        with:
+          {
+            name: pilllauncher-linux,
+            path: engine/pill_launcher/target/release,
+          }
+      - name: Full suite (all launcher action tests)
+        run: bash devops/tests/run_pill_launcher_tests.sh build run docs

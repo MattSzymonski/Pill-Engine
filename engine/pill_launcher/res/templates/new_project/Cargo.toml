@@ -1,0 +1,12 @@
+[package]
+name = "project"
+version = "0.1.0"
+edition = "2021"
+workspace = "NO_PATH"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/project.rs"
+
+[dependencies]
+pill_engine = { path = "NO_PATH", features = ["project", "obj_loading"] }

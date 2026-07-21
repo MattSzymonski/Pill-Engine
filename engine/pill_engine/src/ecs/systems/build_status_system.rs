@@ -1,9 +1,7 @@
-#![cfg(feature = "debug_ui")]
 use crate::{
     ecs::{BuildStatus, BuildStatusIndicatorComponent},
     engine::Engine,
 };
-use pill_core::{Matrix3f, Vector3f};
 
 use pill_core::Result;
 

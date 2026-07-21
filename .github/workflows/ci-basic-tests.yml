@@ -1,0 +1,103 @@
+# Pill CI Pipeline - fast checks on every push
+#
+# Triggers on every push. All jobs run in the pre-built pill-ci container
+# (which includes PillLauncher, Rust toolchain, and WASM tooling), fanning out
+# to 5 parallel checks: code formatting, linting, native build + artifact size,
+# WASM build + artifact size + budget, performance benchmark.
+
+name: CI Basic Tests
+
+on:
+  push:
+    paths-ignore:
+      # Avoid racing ci-build-image.yml — when the Dockerfile changes,
+      # this workflow is triggered by workflow_run instead, after the
+      # new image is built and pushed.
+      - "devops/tests/Dockerfile"
+      - ".github/workflows/ci-build-image.yml"
+  workflow_run:
+    workflows: [CI Build Docker Image]
+    types: [completed]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  packages: read
+
+env:
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1. code_formatting_check
+  # ------------------------------------------------------------------
+  code_formatting_check:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: rustfmt check
+        run: bash devops/tests/run_basic_tests.sh code_formatting_check
+
+  # ------------------------------------------------------------------
+  # 2. code_linting_check
+  # ------------------------------------------------------------------
+  code_linting_check:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: "engine -> target" }
+      - name: clippy lint
+        run: bash devops/tests/run_basic_tests.sh code_linting_check
+
+  # ------------------------------------------------------------------
+  # 3. build_native_cube_example
+  # ------------------------------------------------------------------
+  build_native_cube_example:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            engine -> target
+            examples/cube -> target
+      - name: Build cube example
+        run: bash devops/tests/run_basic_tests.sh build_native_cube_example
+
+  # ------------------------------------------------------------------
+  # 4. build_wasm_cube_example
+  # ------------------------------------------------------------------
+  build_wasm_cube_example:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            examples/cube/build/wasm/.build/pill_web -> target
+      - name: WASM build
+        run: bash devops/tests/run_basic_tests.sh build_wasm_cube_example
+
+  # ------------------------------------------------------------------
+  # 5. benchmark_native_performance
+  # ------------------------------------------------------------------
+  benchmark_performance:
+    runs-on: ubuntu-latest
+    container: ghcr.io/mattszymonski/pill-ci:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            engine -> target
+            examples/city -> target
+      - name: City performance benchmark (headless, 3 runs)
+        run: bash devops/tests/run_basic_tests.sh benchmark_native_performance

@@ -1,0 +1,21 @@
+[package]
+name = "project"
+version = "0.1.0"
+edition = "2021"
+workspace = "NO_PATH"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/project.rs"
+
+[dependencies]
+pill_engine = { path = "../../engine/pill_engine", features = [
+    "project",
+    "obj_loading",
+] }
+rand = "0.8.4"
+
+[features]
+benchmark_windowed = []
+benchmark_headless = []
+default = []

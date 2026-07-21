@@ -57,8 +57,8 @@ macro_rules! define_global_component {
 
 // --- Use ---
 
-#[cfg(feature = "game")]
-pub mod game {
+#[cfg(feature = "project")]
+pub mod project {
     pub use crate::{
         ecs::{
             CameraAspectRatio, CameraComponent, Component, ComponentStorage, EntityHandle,
@@ -66,7 +66,7 @@ pub mod game {
             MeshRenderingComponent, PlayerId, SceneHandle, TimeComponent, TransformComponent,
             UpdatePhase,
         },
-        engine::{Engine, KeyboardKey, MouseButton, PillGame},
+        engine::{Engine, KeyboardKey, MouseButton, PillProject},
         resources::{
             Material, MaterialHandle, Mesh, MeshHandle, Resource, ResourceLoader, ResourceStorage,
             Shader, ShaderParameterSlot, ShaderParameterType, ShaderTextureSlot, Texture,
@@ -93,7 +93,7 @@ pub mod game {
 
     extern crate pill_core;
     pub use pill_core::{
-        create_game, define_new_pill_slotmap_key, Color, PillTypeMapKey, Vector2f, Vector2i,
+        create_project, define_new_pill_slotmap_key, Color, PillTypeMapKey, Vector2f, Vector2i,
         Vector3f, DISTINCT_COLOR_PALETTE,
     };
 
@@ -114,7 +114,7 @@ mod internal_mod {
             NetworkEntityAction, NetworkEntityState, NetworkManagerComponent, NetworkSide,
             NetworkStateComponent, NetworkUpdatePayload, Scene, TimeComponent, TransformComponent,
         },
-        engine::{Engine, PillGame},
+        engine::{Engine, PillProject},
         graphics::{
             decompose_render_queue_key, PillRenderer, RenderQueueItem, RenderQueueKey,
             RenderQueueKeyFields, RendererCameraHandle, RendererMaterialHandle, RendererMeshHandle,
@@ -140,7 +140,7 @@ mod internal_mod {
             CameraAspectRatio, CameraComponent, ComponentStorage, EntityHandle, InputComponent,
             MeshRenderingComponent, Scene, TimeComponent, TransformComponent,
         },
-        engine::{Engine, PillGame},
+        engine::{Engine, PillProject},
         graphics::{
             decompose_render_queue_key, PillRenderer, RenderQueueItem, RenderQueueKey,
             RenderQueueKeyFields, RendererCameraHandle, RendererMaterialHandle, RendererMeshHandle,

@@ -34,7 +34,13 @@ impl<T> ErrorContext<T> for Option<T> {
 impl<T, S: Into<PillError>> ErrorContext<T> for std::result::Result<T, S> {
     #[inline]
     fn context<E: Into<PillError>>(self, err: E) -> Result<T> {
-        self.map_err(|_| err.into())
+        self.map_err(|original| {
+            let context_msg = err.into();
+            let original_msg = original.into();
+            // Chain: the new context wraps the original, preserving both messages.
+            let chained: PillError = format!("{context_msg}: {original_msg}").into();
+            chained
+        })
     }
 }
 
@@ -57,7 +63,7 @@ pub use bitmask_utils::{
 };
 
 pub use utils::{
-    enum_variant_eq, get_enum_variant_type_name, get_game_error_message, get_type_name,
+    enum_variant_eq, get_enum_variant_type_name, get_project_error_message, get_type_name,
     get_value_type_name, validate_asset_path,
 };
 

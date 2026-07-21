@@ -1,6 +1,6 @@
 //! Web/wasm runtime entry — peer to `pill_native`. Hosts the boilerplate that
-//! every wasm game shares (panic hook, console_log, canvas wiring, event loop)
-//! so the per-game template shim only constructs its `PillGame` impl and calls
+//! every wasm project shares (panic hook, console_log, canvas wiring, event loop)
+//! so the per-project template shim only constructs its `PillProject` impl and calls
 //! `pill_web::run(...)` with the embedded config.
 
 #![cfg(target_arch = "wasm32")]
@@ -34,13 +34,13 @@ macro_rules! must {
     };
 }
 
-/// Boots the game on a WebGPU canvas. Call from a `#[wasm_bindgen(start)]`
-/// shim in the per-game crate, after constructing the game's `PillGame` impl.
+/// Boots the pill project on a WebGPU canvas. Call from a `#[wasm_bindgen(start)]`
+/// shim in the per-project crate, after constructing the project's `PillProject` impl.
 ///
-/// `config_ini` is the contents of the game's `res/config.ini`. The launcher
-/// embeds it into the per-game crate via `include_str!` because wasm has no
+/// `config_ini` is the contents of the project's `res/config.ini`. The launcher
+/// embeds it into the per-project crate via `include_str!` because wasm has no
 /// filesystem at runtime.
-pub fn run(game: Box<dyn PillGame>, config_ini: &'static str) {
+pub fn run(project: Box<dyn PillProject>, config_ini: &'static str) {
     #[cfg(debug_assertions)]
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     #[cfg(debug_assertions)]
@@ -52,10 +52,10 @@ pub fn run(game: Box<dyn PillGame>, config_ini: &'static str) {
         std::env::consts::ARCH
     );
 
-    wasm_bindgen_futures::spawn_local(run_async(game, config_ini));
+    wasm_bindgen_futures::spawn_local(run_async(project, config_ini));
 }
 
-async fn run_async(game: Box<dyn PillGame>, config_ini: &'static str) {
+async fn run_async(project: Box<dyn PillProject>, config_ini: &'static str) {
     let event_loop = must!(EventLoop::new());
 
     let window = {
@@ -91,13 +91,13 @@ async fn run_async(game: Box<dyn PillGame>, config_ini: &'static str) {
         window_size = PhysicalSize::new(1280, 720);
     }
 
-    // Parse the embedded config.ini provided by the per-game shim. Wasm has
+    // Parse the embedded config.ini provided by the per-project shim. Wasm has
     // no filesystem, so the launcher inlined the bytes via include_str! at
     // build time.
     let mut config = pill_engine::internal::EngineConfig::from_ini(config_ini);
     config.set("WINDOW_WIDTH", window_size.width as i64);
     config.set("WINDOW_HEIGHT", window_size.height as i64);
-    let compile_mode = std::env::var("PILL_COMPILE_MODE").unwrap_or_else(|_| "unknown".to_string());
+    let compile_mode = std::env::var("PILL_COMPILE_MODE").unwrap_or_else(|_| "debug".to_string());
     let process = pill_engine::internal::EngineProcessInfo::new(
         &compile_mode,
         pill_engine::internal::BuildTarget::Web,
@@ -110,7 +110,7 @@ async fn run_async(game: Box<dyn PillGame>, config_ini: &'static str) {
 
     log::info!("Creating engine...");
     let mut engine = Engine::new(
-        game,
+        project,
         std::path::PathBuf::from("res"),
         renderer,
         config,
@@ -123,7 +123,7 @@ async fn run_async(game: Box<dyn PillGame>, config_ini: &'static str) {
         Err(_e) => {
             #[cfg(debug_assertions)]
             panic!("engine init failed: {:#}", _e);
-            // Safety: if initialize() fails the game is unrunnable regardless;
+            // Safety: if initialize() fails the pill project is unrunnable regardless;
             // treat as unreachable so LLVM DCEs EngineError::fmt + flt2dec.
             #[cfg(not(debug_assertions))]
             unsafe {

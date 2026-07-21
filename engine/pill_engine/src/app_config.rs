@@ -1,7 +1,5 @@
-use std::collections::HashMap;
-
 use pill_core::Result;
-use std::str::FromStr;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileMode {
@@ -102,6 +100,14 @@ impl EngineConfig {
             "false" | "0" | "no" => Ok(false),
             _ => Err(format!("Config key {key} is not a valid bool: {v}").into()),
         }
+    }
+
+    pub fn get_str(&self, key: &str) -> Result<String> {
+        use pill_core::PillError;
+        self.values
+            .get(&key.to_ascii_uppercase())
+            .cloned()
+            .ok_or_else(|| -> PillError { format!("{key} not found in config").into() })
     }
 }
 
