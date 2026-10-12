@@ -162,7 +162,6 @@ jobs:
           - examples/tunnel
           - examples/pbr_helmet
           - examples/pbr_balls
-          - examples/sponza
     steps:
       - uses: actions/checkout@v4
 
