@@ -154,6 +154,8 @@ jobs:
   build_wasm_example:
     runs-on: ubuntu-latest
     needs: build_launcher
+    # Optional examples report failures without failing the run
+    continue-on-error: ${{ matrix.optional == true }}
     strategy:
       fail-fast: false
       matrix:
@@ -162,6 +164,9 @@ jobs:
           - examples/tunnel
           - examples/pbr_helmet
           - examples/pbr_balls
+        include:
+          - example: examples/sponza
+            optional: true
     steps:
       - uses: actions/checkout@v4
 
