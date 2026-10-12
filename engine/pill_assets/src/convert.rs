@@ -4,6 +4,7 @@
 //! and `RMSH`/`RTEX` encoders used by both the build-time cooker (`GlbToCookedMesh`) and the
 //! engine's runtime glTF loader.
 
+use anyhow::{bail, Result};
 use bytemuck::{Pod, Zeroable};
 
 use crate::util::vec_math::{add3, cross3, normalize3, scale3, sub2, sub3};
@@ -46,7 +47,7 @@ pub struct PrimitiveAttributes {
 pub fn build_primitive(
     attributes: PrimitiveAttributes,
     world_transform: Mat4,
-) -> (Vec<CookedVertex>, Vec<u32>) {
+) -> Result<(Vec<CookedVertex>, Vec<u32>)> {
     let PrimitiveAttributes {
         positions,
         normals,
@@ -55,15 +56,46 @@ pub fn build_primitive(
         indices,
     } = attributes;
 
-    let mut indices = indices.unwrap_or_else(|| (0..positions.len() as u32).collect());
+    let vertex_count = positions.len();
+    let counts = [
+        ("NORMAL", normals.as_ref().map_or(vertex_count, Vec::len)),
+        (
+            "TEXCOORD_0",
+            texture_coordinates.as_ref().map_or(vertex_count, Vec::len),
+        ),
+        (
+            "TANGENT",
+            if tangents.is_empty() {
+                vertex_count
+            } else {
+                tangents.len()
+            },
+        ),
+    ];
+    for (name, count) in counts {
+        if count != vertex_count {
+            bail!("{name} has {count} entries, POSITION has {vertex_count}");
+        }
+    }
+    let mut indices = indices.unwrap_or_else(|| (0..vertex_count as u32).collect());
+    if let Some(&index) = indices
+        .iter()
+        .find(|&&index| index as usize >= vertex_count)
+    {
+        bail!("index {index} out of range for {vertex_count} vertices");
+    }
     indices.truncate(indices.len() / 3 * 3);
-    // A mirrored node (negative scale) flips triangle winding; swap it back for back-face culling
-    if determinant3(world_transform) < 0.0 {
+    // Face normals from the original winding, before the mirror fix-up below
+    let normals = normals.unwrap_or_else(|| face_normals(&positions, &indices));
+    // A mirrored node (negative scale) flips winding and cross(N, T): swap the winding back for
+    // back-face culling and correct the bitangent sign with `handedness`
+    let mirrored = determinant3(world_transform) < 0.0;
+    if mirrored {
         for triangle in indices.chunks_mut(3) {
             triangle.swap(1, 2);
         }
     }
-    let normals = normals.unwrap_or_else(|| face_normals(&positions, &indices));
+    let handedness = if mirrored { -1.0 } else { 1.0 };
     let texture_coordinates =
         texture_coordinates.unwrap_or_else(|| vec![[0.0, 0.0]; positions.len()]);
 
@@ -74,6 +106,7 @@ pub fn build_primitive(
                 .get(vertex_index)
                 .map(|tangent| (tangent[0], tangent[1], tangent[2], tangent[3]))
                 .unwrap_or((1.0, 0.0, 0.0, 1.0));
+            let sign = sign * handedness;
             let tangent_world =
                 transform_normal(world_transform, [tangent_x, tangent_y, tangent_z]);
             let bitangent_x = (normal[1] * tangent_world[2] - normal[2] * tangent_world[1]) * sign;
@@ -92,7 +125,20 @@ pub fn build_primitive(
     if tangents.is_empty() {
         compute_tangents(&mut vertices, &indices);
     }
-    (vertices, indices)
+    Ok((vertices, indices))
+}
+
+/// RTEX v1 from owned RGBA8 texels; the header is prepended in the same allocation.
+pub fn rtex_from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Vec<u8> {
+    let mut header = [0u8; 16];
+    header[0..4].copy_from_slice(b"RTEX");
+    header[4..8].copy_from_slice(&1u32.to_le_bytes());
+    header[8..12].copy_from_slice(&width.to_le_bytes());
+    header[12..16].copy_from_slice(&height.to_le_bytes());
+    // Exact capacity, so a later `into_boxed_slice` doesn't reallocate
+    rgba.reserve_exact(16);
+    rgba.splice(0..0, header);
+    rgba
 }
 
 /// RMSH v1: `b"RMSH"` + u32 version=1 + u32 vertex_count + u32 index_count + vertices + indices.
@@ -246,4 +292,80 @@ fn transform_normal(matrix: Mat4, normal: [f32; 3]) -> [f32; 3] {
         matrix[2][0] * normal[0] + matrix[2][1] * normal[1] + matrix[2][2] * normal[2],
     ];
     normalize3(transformed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIRROR_X: Mat4 = [
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+
+    // CCW triangle in the XY plane, facing +Z
+    fn triangle() -> PrimitiveAttributes {
+        PrimitiveAttributes {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: None,
+            texture_coordinates: None,
+            tangents: Vec::new(),
+            indices: None,
+        }
+    }
+
+    fn approx(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5)
+    }
+
+    #[test]
+    fn mirrored_without_normal_keeps_outward_normal() {
+        let (vertices, _) = build_primitive(triangle(), MIRROR_X).unwrap();
+        assert!(
+            approx(vertices[0].normal, [0.0, 0.0, 1.0]),
+            "{:?}",
+            vertices[0].normal
+        );
+    }
+
+    #[test]
+    fn mirrored_with_tangent_keeps_bitangent() {
+        let attributes = PrimitiveAttributes {
+            normals: Some(vec![[0.0, 0.0, 1.0]; 3]),
+            tangents: vec![[1.0, 0.0, 0.0, 1.0]; 3],
+            ..triangle()
+        };
+        let (vertices, _) = build_primitive(attributes, MIRROR_X).unwrap();
+        assert!(
+            approx(vertices[0].bitangent, [0.0, 1.0, 0.0]),
+            "{:?}",
+            vertices[0].bitangent
+        );
+    }
+
+    #[test]
+    fn normal_count_mismatch_is_rejected() {
+        let attributes = PrimitiveAttributes {
+            normals: Some(vec![[0.0, 0.0, 1.0]; 2]),
+            ..triangle()
+        };
+        assert!(build_primitive(attributes, IDENTITY).is_err());
+    }
+
+    #[test]
+    fn out_of_range_index_is_rejected() {
+        let attributes = PrimitiveAttributes {
+            indices: Some(vec![0, 1, 3]),
+            ..triangle()
+        };
+        assert!(build_primitive(attributes, IDENTITY).is_err());
+    }
+
+    #[test]
+    fn rtex_from_rgba_prepends_header() {
+        let rtex = rtex_from_rgba(1, 1, vec![1, 2, 3, 4]);
+        assert_eq!(rtex, rtex_bytes(1, 1, &[1, 2, 3, 4]));
+    }
 }

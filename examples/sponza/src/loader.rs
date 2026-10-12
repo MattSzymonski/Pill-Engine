@@ -4,7 +4,7 @@
 //!
 //! All glTF parsing, image decoding and mesh/texture byte-format conversion lives in the engine
 //! (`pill_engine`'s `gltf_loading` feature). This module is just I/O + orchestration: the fetch is
-//! the only platform-specific part (async `fetch` on WASM, blocking `ureq` on native).
+//! the only platform-specific part (browser `fetch` on WASM, `ureq` threads on native).
 
 use pill_engine::game::{gltf_resource_uris, ibl, parse_gltf_scene, GltfSceneData};
 
@@ -16,82 +16,42 @@ pub struct SponzaCpu {
     pub ibl: (Vec<f32>, Vec<Vec<f32>>), // ibl::bake_all output: diffuse, specular mips
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn base_url() -> &'static str {
-    fetch::SPONZA_BASE
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn load_native() -> Result<SponzaCpu, String> {
-    let gltf_bytes = fetch::get(&format!("{}Sponza.gltf", fetch::SPONZA_BASE))?;
+/// Fetches the glTF, then its buffers, textures and the HDR concurrently; parses and bakes IBL.
+pub async fn load() -> Result<SponzaCpu, String> {
+    let gltf_url = format!("{}Sponza.gltf", fetch::SPONZA_BASE);
+    let gltf_bytes = fetch::get_all(std::slice::from_ref(&gltf_url))
+        .await?
+        .remove(0);
     let uris = gltf_resource_uris(&gltf_bytes).map_err(|e| e.to_string())?;
 
-    let total = 2 + uris.buffers.len() + uris.images.len();
-    let mut progress = Progress::new(total);
-    progress.tick(gltf_bytes.len());
-
-    let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(uris.buffers.len());
-    for uri in &uris.buffers {
-        let bytes = match uri {
-            Some(uri) => fetch::get(&format!("{}{}", fetch::SPONZA_BASE, uri))?,
-            None => Vec::new(), // embedded BIN; engine resolves it from the blob
-        };
-        progress.tick(bytes.len());
-        buffers.push(bytes);
-    }
-
-    let mut images: Vec<Vec<u8>> = Vec::with_capacity(uris.images.len());
-    for uri in &uris.images {
-        let bytes = match uri {
-            Some(uri) => fetch::get(&format!("{}{}", fetch::SPONZA_BASE, uri))?,
-            None => Vec::new(), // embedded in a buffer view; engine resolves it
-        };
-        progress.tick(bytes.len());
-        images.push(bytes);
-    }
-
-    let scene = parse_gltf_scene(&gltf_bytes, &buffers, &images).map_err(|e| e.to_string())?;
-
-    let hdr = fetch::get(fetch::HDR_URL)?;
-    progress.tick(hdr.len());
-
-    finish(scene, &hdr)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub async fn load_wasm() -> Result<SponzaCpu, String> {
-    let gltf_bytes = fetch::get(&format!("{}Sponza.gltf", fetch::SPONZA_BASE)).await?;
-    let uris = gltf_resource_uris(&gltf_bytes).map_err(|e| e.to_string())?;
-
-    let total = 2 + uris.buffers.len() + uris.images.len();
-    let mut progress = Progress::new(total);
-    progress.tick(gltf_bytes.len());
-
-    let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(uris.buffers.len());
-    for uri in &uris.buffers {
-        let bytes = match uri {
-            Some(uri) => fetch::get(&format!("{}{}", fetch::SPONZA_BASE, uri)).await?,
-            None => Vec::new(), // embedded BIN; engine resolves it from the blob
-        };
-        progress.tick(bytes.len());
-        buffers.push(bytes);
-    }
-
-    let mut images: Vec<Vec<u8>> = Vec::with_capacity(uris.images.len());
-    for uri in &uris.images {
-        let bytes = match uri {
-            Some(uri) => fetch::get(&format!("{}{}", fetch::SPONZA_BASE, uri)).await?,
+    // `None` entries (embedded data) stay empty; the engine resolves them from the document
+    let resources: Vec<&Option<String>> = uris.buffers.iter().chain(&uris.images).collect();
+    let mut urls: Vec<String> = resources
+        .iter()
+        .filter_map(|uri| uri.as_ref())
+        .map(|uri| format!("{}{}", fetch::SPONZA_BASE, uri))
+        .collect();
+    urls.push(fetch::HDR_URL.to_string());
+    log::info!("Sponza: fetching {} files", urls.len() + 1);
+    let mut fetched = fetch::get_all(&urls).await?.into_iter();
+    let mut resolved: Vec<Vec<u8>> = resources
+        .iter()
+        .map(|uri| match uri {
+            Some(_) => fetched.next().unwrap_or_default(),
             None => Vec::new(),
-        };
-        progress.tick(bytes.len());
-        images.push(bytes);
-    }
+        })
+        .collect();
+    let hdr = fetched.next().unwrap_or_default();
+    let images = resolved.split_off(uris.buffers.len());
+    log::info!(
+        "Sponza: fetched {:.1} MB",
+        (gltf_bytes.len() + hdr.len() + resolved.iter().chain(&images).map(Vec::len).sum::<usize>())
+            as f64
+            / (1024.0 * 1024.0)
+    );
 
-    let scene = parse_gltf_scene(&gltf_bytes, &buffers, &images).map_err(|e| e.to_string())?;
-
-    let hdr = fetch::get(fetch::HDR_URL).await?;
-    progress.tick(hdr.len());
-
+    let scene =
+        parse_gltf_scene("sponza", &gltf_bytes, &resolved, &images).map_err(|e| e.to_string())?;
     finish(scene, &hdr)
 }
 
@@ -110,33 +70,4 @@ fn finish(scene: GltfSceneData, hdr_bytes: &[u8]) -> Result<SponzaCpu, String> {
         equirect,
         ibl,
     })
-}
-
-// --- Progress (log only, fully derived from the document) ---
-
-struct Progress {
-    done: usize,
-    total: usize,
-    bytes: usize,
-}
-
-impl Progress {
-    fn new(total: usize) -> Self {
-        Self {
-            done: 0,
-            total,
-            bytes: 0,
-        }
-    }
-    fn tick(&mut self, last: usize) {
-        self.done += 1;
-        self.bytes += last;
-        log::info!(
-            "Sponza: file {}/{}, +{} KB, {:.1} MB so far",
-            self.done,
-            self.total,
-            last / 1024,
-            self.bytes as f64 / (1024.0 * 1024.0),
-        );
-    }
 }

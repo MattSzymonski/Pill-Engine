@@ -10,14 +10,10 @@ define_component!(OrbitCamera {
 
 pub struct Game {}
 
-// On WASM the model is fetched asynchronously: the spawn_local task (which cannot hold &mut Engine,
-// since the event loop owns it) deposits a finished CPU payload here, and `sponza_drain_system`
-// picks it up on the next frame and performs the GPU uploads + entity build.
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static PENDING: std::cell::RefCell<Option<SponzaCpu>> = const { std::cell::RefCell::new(None) };
-    static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
+// The background load (spawn_local task on WASM, thread on native) can't hold &mut Engine; it
+// leaves its result here for `sponza_drain_system` to upload on the next frame.
+type Loaded = std::result::Result<SponzaCpu, String>;
+static PENDING: std::sync::Mutex<Option<Loaded>> = std::sync::Mutex::new(None);
 
 // Orbit around a point at mid-height of the atrium so the camera circles inside the hall.
 const ORBIT_CENTER_Y: f32 = 5.0;
@@ -50,23 +46,26 @@ fn orbit_camera_system(engine: &mut Engine) -> Result<()> {
     Ok(())
 }
 
-// Drains the fetched payload into the engine once loading finishes (WASM only). Idempotent.
-#[cfg(target_arch = "wasm32")]
+// Uploads the loaded payload once it arrives; a failed load is logged and the empty scene keeps running.
 fn sponza_drain_system(engine: &mut Engine) -> Result<()> {
-    if DONE.with(|d| d.get()) {
-        return Ok(());
+    let loaded = PENDING
+        .lock()
+        .map_err(|_| PillError::from("Sponza load lock poisoned"))?
+        .take();
+    match loaded {
+        Some(Ok(cpu)) => {
+            let scene = engine.get_active_scene_handle()?;
+            spawn_assets(engine, scene, cpu)
+        }
+        Some(Err(error)) => {
+            log::error!("Sponza load failed: {error}");
+            Ok(())
+        }
+        None => Ok(()),
     }
-    let cpu = PENDING.with(|p| p.borrow_mut().take());
-    if let Some(cpu) = cpu {
-        let scene = engine.get_active_scene_handle()?;
-        spawn_assets(engine, scene, cpu)?;
-        DONE.with(|d| d.set(true));
-    }
-    Ok(())
 }
 
-// Uploads the CPU payload to the GPU and builds one entity per primitive. Shared by the native
-// inline path and the WASM drain system.
+// Uploads the CPU payload to the GPU and builds one entity per primitive.
 fn spawn_assets(engine: &mut Engine, scene: SceneHandle, cpu: SponzaCpu) -> Result<()> {
     // --- IBL (background + diffuse/specular; the BRDF LUT is engine-owned) ---
     let equirect = &cpu.equirect;
@@ -98,19 +97,26 @@ fn spawn_assets(engine: &mut Engine, scene: SceneHandle, cpu: SponzaCpu) -> Resu
         render_state.ibl_specular = specular_handle;
     }
 
-    // --- Textures ---
-    let mut texture_handles: Vec<TextureHandle> = Vec::with_capacity(cpu.scene.textures.len());
-    for texture in &cpu.scene.textures {
-        texture_handles.push(engine.add_resource(Texture::from_bytes(
+    let GltfSceneData {
+        textures,
+        materials,
+        meshes,
+    } = cpu.scene;
+
+    // --- Textures (moved, so each is freed once uploaded) ---
+    let mut texture_handles: Vec<TextureHandle> = Vec::with_capacity(textures.len());
+    for texture in textures {
+        texture_handles.push(engine.add_resource(Texture::from_bytes_owned(
             &texture.name,
             texture.kind,
-            &texture.rtex,
+            texture.rtex,
         ))?);
     }
 
     // --- Materials ---
-    let mut material_handles: Vec<MaterialHandle> = Vec::with_capacity(cpu.scene.materials.len());
-    for material in &cpu.scene.materials {
+    let mut material_handles: Vec<MaterialHandle> = Vec::with_capacity(materials.len());
+    for material in &materials {
+        let [red, green, blue] = material.emissive_color;
         let mut pbr = Material::new(&material.name)
             .albedo(Color::new(
                 material.base_color[0],
@@ -118,7 +124,8 @@ fn spawn_assets(engine: &mut Engine, scene: SceneHandle, cpu: SponzaCpu) -> Resu
                 material.base_color[2],
             ))
             .metallic(material.metallic)
-            .roughness(material.roughness);
+            .roughness(material.roughness)
+            .emissive(Color::new(red, green, blue));
         if let Some(i) = material.albedo {
             pbr = pbr.albedo_texture(texture_handles[i]);
         }
@@ -135,7 +142,7 @@ fn spawn_assets(engine: &mut Engine, scene: SceneHandle, cpu: SponzaCpu) -> Resu
     }
 
     // --- Meshes + entities (world transform already baked into the vertices) ---
-    for mesh in &cpu.scene.meshes {
+    for mesh in &meshes {
         let mesh_handle =
             engine.add_resource(Mesh::from_cooked_mesh_bytes(&mesh.name, &mesh.rmsh)?)?;
         engine
@@ -150,7 +157,7 @@ fn spawn_assets(engine: &mut Engine, scene: SceneHandle, cpu: SponzaCpu) -> Resu
             .build();
     }
 
-    log::info!("Sponza: uploaded {} meshes to GPU", cpu.scene.meshes.len());
+    log::info!("Sponza: uploaded {} meshes to GPU", meshes.len());
     Ok(())
 }
 
@@ -186,23 +193,17 @@ impl PillGame for Game {
 
         engine.add_system("orbit_camera", orbit_camera_system)?;
 
-        // Kick off the runtime fetch (the whole point of this example).
+        // Load in the background; frames render meanwhile and the drain system uploads the result
+        let store = |result| {
+            if let Ok(mut pending) = PENDING.lock() {
+                *pending = Some(result);
+            }
+        };
         #[cfg(target_arch = "wasm32")]
-        {
-            wasm_bindgen_futures::spawn_local(async {
-                match loader::load_wasm().await {
-                    Ok(cpu) => PENDING.with(|p| *p.borrow_mut() = Some(cpu)),
-                    Err(e) => log::error!("Sponza load failed: {e}"),
-                }
-            });
-            engine.add_system("sponza_drain", sponza_drain_system)?;
-        }
+        wasm_bindgen_futures::spawn_local(async move { store(loader::load().await) });
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            log::info!("Sponza: loading from {}", loader::base_url());
-            let cpu = loader::load_native().map_err(PillError::from)?;
-            spawn_assets(engine, scene, cpu)?;
-        }
+        std::thread::spawn(move || store(pollster::block_on(loader::load())));
+        engine.add_system("sponza_drain", sponza_drain_system)?;
 
         Ok(())
     }

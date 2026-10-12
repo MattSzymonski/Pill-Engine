@@ -18,36 +18,46 @@ pub const DIFFUSE_SIZE: (u32, u32) = (32, 16);
 /// Specular prefilter base mip size (Rgba32Float, 5 mips).
 pub const SPECULAR_SIZE: (u32, u32) = (128, 64);
 
-/// Decodes a Radiance `.hdr` equirectangular panorama and resizes it to 512×256 RGBA f32.
-/// (Runtime equivalent of the build-time HDR decode step.) Bilinear downsample is plenty for a
-/// low-frequency environment map.
+/// Equirect size used for backgrounds and as IBL bake input (2:1 panorama).
+pub const EQUIRECT_SIZE: (u32, u32) = (512, 256);
+
+/// Decodes a Radiance `.hdr` panorama and resamples it to `EQUIRECT_SIZE` RGBA f32: box filter
+/// when shrinking (no aliasing at any ratio), bilinear when enlarging.
 pub fn equirect_from_hdr(bytes: &[u8]) -> Result<Equirect> {
     let mut decoder = zune_hdr::HdrDecoder::new(bytes);
     let rgb: Vec<f32> = decoder.decode().map_err(|e| anyhow!("decode HDR: {e:?}"))?;
     let (src_w, src_h) = decoder
         .get_dimensions()
         .ok_or_else(|| anyhow!("HDR has no dimensions"))?;
+    if src_w == 0 || src_h == 0 || rgb.len() != src_w * src_h * 3 {
+        bail!("HDR is {src_w}x{src_h} with {} values", rgb.len());
+    }
 
-    let (out_w, out_h) = (512usize, 256usize);
-    let mut pixels = Vec::with_capacity(out_w * out_h * 4);
-    let sample = |x: usize, y: usize, c: usize| rgb[(y * src_w + x) * 3 + c];
-    for oy in 0..out_h {
-        let fy = ((oy as f32 + 0.5) / out_h as f32 * src_h as f32 - 0.5).max(0.0);
-        let y0 = (fy as usize).min(src_h - 1);
-        let y1 = (y0 + 1).min(src_h - 1);
-        let wy = fy - y0 as f32;
-        for ox in 0..out_w {
-            let fx = ((ox as f32 + 0.5) / out_w as f32 * src_w as f32 - 0.5).max(0.0);
-            let x0 = (fx as usize).min(src_w - 1);
-            let x1 = (x0 + 1).min(src_w - 1);
-            let wx = fx - x0 as f32;
-            let mut rgba = [0.0f32, 0.0, 0.0, 1.0];
-            for (c, out) in rgba.iter_mut().take(3).enumerate() {
-                let top = sample(x0, y0, c) + (sample(x1, y0, c) - sample(x0, y0, c)) * wx;
-                let bot = sample(x0, y1, c) + (sample(x1, y1, c) - sample(x0, y1, c)) * wx;
-                *out = top + (bot - top) * wy;
+    let (out_w, out_h) = (EQUIRECT_SIZE.0 as usize, EQUIRECT_SIZE.1 as usize);
+    let x_taps = resample_taps(src_w, out_w);
+    let y_taps = resample_taps(src_h, out_h);
+    // Horizontal pass: src_h rows of out_w RGB texels
+    let mut rows = vec![0.0f32; src_h * out_w * 3];
+    for y in 0..src_h {
+        for (ox, taps) in x_taps.iter().enumerate() {
+            for &(x, weight) in taps {
+                for c in 0..3 {
+                    rows[(y * out_w + ox) * 3 + c] += rgb[(y * src_w + x) * 3 + c] * weight;
+                }
             }
-            pixels.extend_from_slice(&rgba);
+        }
+    }
+    // Vertical pass into RGBA
+    let mut pixels = vec![0.0f32; out_w * out_h * 4];
+    for (oy, taps) in y_taps.iter().enumerate() {
+        for ox in 0..out_w {
+            let out = &mut pixels[(oy * out_w + ox) * 4..][..4];
+            for &(y, weight) in taps {
+                for c in 0..3 {
+                    out[c] += rows[(y * out_w + ox) * 3 + c] * weight;
+                }
+            }
+            out[3] = 1.0;
         }
     }
     Ok(Equirect {
@@ -55,6 +65,28 @@ pub fn equirect_from_hdr(bytes: &[u8]) -> Result<Equirect> {
         width: out_w as u32,
         height: out_h as u32,
     })
+}
+
+/// Per output index, the (source index, weight) taps: the covered source range when shrinking,
+/// the two nearest source texels when enlarging. Weights sum to 1.
+fn resample_taps(src: usize, out: usize) -> Vec<Vec<(usize, f32)>> {
+    let scale = src as f32 / out as f32;
+    (0..out)
+        .map(|o| {
+            if scale > 1.0 {
+                let start = (o as f32 * scale) as usize;
+                let end = (((o + 1) as f32 * scale).ceil() as usize).clamp(start + 1, src);
+                let weight = 1.0 / (end - start) as f32;
+                (start..end).map(|s| (s, weight)).collect()
+            } else {
+                let f = ((o as f32 + 0.5) * scale - 0.5).max(0.0);
+                let s0 = (f as usize).min(src - 1);
+                let s1 = (s0 + 1).min(src - 1);
+                let t = f - s0 as f32;
+                vec![(s0, 1.0 - t), (s1, t)]
+            }
+        })
+        .collect()
 }
 
 /// Bakes IBL maps from an Rgba32Float equirect panorama.
@@ -99,6 +131,18 @@ impl Equirect {
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
         let width = u32::from_le_bytes(data[8..12].try_into().unwrap());
         let height = u32::from_le_bytes(data[12..16].try_into().unwrap());
+        let bytes_per_texel = match version {
+            1 => 4,
+            2 => 16,
+            _ => bail!("RTEX v{version} is not an equirect (expected v1 or v2)"),
+        };
+        let expected = width as usize * height as usize * bytes_per_texel;
+        if width == 0 || height == 0 || data.len() - 16 != expected {
+            bail!(
+                "RTEX {width}x{height} v{version}: payload is {} bytes, expected {expected}",
+                data.len() - 16
+            );
+        }
         let pixels = if version == 2 {
             // v2: Rgba32Float (4 bytes per channel, f32 LE)
             let (texels, _) = data[16..].as_chunks::<4>();
@@ -361,4 +405,70 @@ pub fn compute_brdf_lut(width: u32, height: u32) -> Vec<f32> {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Minimal Radiance file: header + RLE scanlines (each channel as literal chunks of ≤ 128)
+    fn hdr(width: usize, height: usize, rgbe: &[[u8; 4]]) -> Vec<u8> {
+        let mut bytes =
+            format!("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y {height} +X {width}\n").into_bytes();
+        for row in rgbe.chunks(width) {
+            bytes.extend_from_slice(&[2, 2, (width >> 8) as u8, width as u8]);
+            for channel in 0..4 {
+                let values: Vec<u8> = row.iter().map(|pixel| pixel[channel]).collect();
+                for chunk in values.chunks(128) {
+                    bytes.push(chunk.len() as u8);
+                    bytes.extend_from_slice(chunk);
+                }
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn hdr_with_zero_height_is_rejected() {
+        assert!(equirect_from_hdr(&hdr(4, 0, &[])).is_err());
+    }
+
+    #[test]
+    fn hdr_downscale_preserves_single_bright_texel_energy() {
+        let (width, height) = (4096, 2048);
+        let mut rgbe = vec![[0u8; 4]; width * height];
+        rgbe[1000 * width + 3001] = [128, 128, 128, 136]; // 0.5 · 2^8 = 128.0
+        let source_energy = 128.0 / (width * height) as f32;
+        let equirect = equirect_from_hdr(&hdr(width, height, &rgbe)).unwrap();
+        let texels = (equirect.width * equirect.height) as f32;
+        let energy: f32 = equirect.pixels.chunks(4).map(|p| p[0]).sum::<f32>() / texels;
+        assert!(
+            (energy / source_energy - 1.0).abs() < 0.01,
+            "{energy} vs {source_energy}"
+        );
+    }
+
+    fn rtex(version: u32, width: u32, height: u32, payload: usize) -> Vec<u8> {
+        let mut bytes = b"RTEX".to_vec();
+        for value in [version, width, height] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.resize(16 + payload, 0);
+        bytes
+    }
+
+    #[test]
+    fn from_rtex_v4_is_rejected() {
+        assert!(Equirect::from_rtex(&rtex(4, 2, 1, 32)).is_err());
+    }
+
+    #[test]
+    fn from_rtex_truncated_v2_is_rejected() {
+        assert!(Equirect::from_rtex(&rtex(2, 2, 1, 31)).is_err());
+    }
+
+    #[test]
+    fn from_rtex_exact_v2_parses() {
+        assert!(Equirect::from_rtex(&rtex(2, 2, 1, 32)).is_ok());
+    }
 }

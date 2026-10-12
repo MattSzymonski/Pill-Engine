@@ -16,8 +16,10 @@ log = "0.4"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Request", "RequestInit", "Response", "RequestMode"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = "2"
+pollster = "0.2"

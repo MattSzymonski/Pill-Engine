@@ -105,7 +105,8 @@ impl Rule for GlbToCookedMesh {
                             .map(|indices| indices.into_u32().collect()),
                     },
                     world_transform,
-                );
+                )
+                .with_context(|| format!("{input:?}: mesh {mesh_index}"))?;
 
                 all_indices.extend(primitive_indices.iter().map(|&index| index + vertex_offset));
                 all_vertices.extend(vertices);

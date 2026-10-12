@@ -10,8 +10,36 @@ pub const SPONZA_BASE: &str =
 pub const HDR_URL: &str =
     "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/studio_small_08_1k.hdr";
 
+/// Fetches all `urls` concurrently; results are in `urls` order.
 #[cfg(target_arch = "wasm32")]
-pub async fn get(url: &str) -> Result<Vec<u8>, String> {
+pub async fn get_all(urls: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    futures::future::join_all(urls.iter().map(|url| get(url)))
+        .await
+        .into_iter()
+        .collect()
+}
+
+/// Fetches all `urls` concurrently (one thread each); results are in `urls` order.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn get_all(urls: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = urls
+            .iter()
+            .map(|url| scope.spawn(move || get(url)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| "fetch thread panicked".to_string())?
+            })
+            .collect()
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn get(url: &str) -> Result<Vec<u8>, String> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{Request, Response};
@@ -38,7 +66,7 @@ pub async fn get(url: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn get(url: &str) -> Result<Vec<u8>, String> {
+fn get(url: &str) -> Result<Vec<u8>, String> {
     use std::io::Read;
     let resp = ureq::get(url)
         .call()
