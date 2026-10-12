@@ -29,6 +29,20 @@ impl Rule for GlbToCookedMesh {
         input.with_extension("cooked_mesh")
     }
 
+    fn extra_outputs(&self, input: &Path) -> Vec<PathBuf> {
+        // Which sidecars a GLB yields depends on its materials: report the ones on disk.
+        let stem = input
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let directory = input.parent().unwrap_or_else(|| Path::new(""));
+        ["albedo", "normal", "metallic_roughness", "emissive"]
+            .iter()
+            .map(|texture_kind| directory.join(format!("{stem}_{texture_kind}.cooked_tex")))
+            .filter(|path| path.exists())
+            .collect()
+    }
+
     fn build(&self, input: &Path, output: &Path) -> Result<()> {
         let bytes = std::fs::read(input).with_context(|| format!("read {input:?}"))?;
         let (document, buffers, images) =

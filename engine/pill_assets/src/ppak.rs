@@ -122,8 +122,23 @@ fn is_shader_source(output: &Path) -> bool {
 pub fn pack_list(res_dir: &Path, stats: &Stats) -> Result<Vec<(String, PathBuf)>> {
     let mut seen = std::collections::HashSet::new();
     let mut to_pack: Vec<(String, PathBuf)> = Vec::new();
-    for output in stats.rebuilt.iter().chain(&stats.skipped) {
-        if !seen.insert(output.clone()) || !output.exists() || is_shader_source(output) {
+    // `edges` holds every produced file (primaries too); side outputs (GLB texture sidecars,
+    // specular IBL) appear nowhere else.
+    let side_outputs = stats.edges.iter().map(|(_, output, _)| output);
+    for output in stats
+        .rebuilt
+        .iter()
+        .chain(&stats.skipped)
+        .chain(side_outputs)
+    {
+        let is_cook_cache = output
+            .file_name()
+            .is_some_and(|name| name == crate::COOK_TIMES_FILE);
+        if !seen.insert(output.clone())
+            || !output.exists()
+            || is_shader_source(output)
+            || is_cook_cache
+        {
             continue;
         }
         let name = output

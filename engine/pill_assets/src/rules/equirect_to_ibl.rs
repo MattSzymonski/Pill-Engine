@@ -24,6 +24,12 @@ impl Rule for EquirectToIBL {
         input.with_file_name(format!("{base}_diffuse_ibl.cooked_tex"))
     }
 
+    fn extra_outputs(&self, input: &Path) -> Vec<PathBuf> {
+        let stem = input.file_stem().unwrap().to_str().unwrap();
+        let base = stem.strip_suffix("_equirect").unwrap_or(stem);
+        vec![input.with_file_name(format!("{base}_specular_ibl.cooked_tex"))]
+    }
+
     fn build(&self, input: &Path, output: &Path) -> Result<()> {
         let data = std::fs::read(input).with_context(|| format!("read {input:?}"))?;
         let equirect = Equirect::from_rtex(&data).with_context(|| format!("{input:?}"))?;

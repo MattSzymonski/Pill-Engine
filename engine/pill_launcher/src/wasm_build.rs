@@ -36,7 +36,7 @@ pub fn build(
     // Cook assets before wasm-pack — cooked files are git-ignored and embedded
     // via include_bytes! at compile time, so they must exist for the game crate
     // to compile on a fresh checkout.
-    crate::cook_assets(game_project_directory_path)?;
+    let asset_stats = crate::cook_assets(game_project_directory_path)?;
 
     prepare_scratch_crate(&wasm_template_dir, &scratch_pill_web_app_dir)?;
     embed_game_config(game_project_directory_path, &scratch_pill_web_app_dir)?;
@@ -52,6 +52,12 @@ pub fn build(
         &game_project_directory_path.join("web"),
         &build_wasm_dir,
     )?;
+
+    // After the build so the wasm artifact size is current.
+    if let Err(error) = crate::write_game_asset_dag(game_project_directory_path, &asset_stats, None)
+    {
+        eprintln!("Warning: asset DAG not written ({error:#})");
+    }
     copy_game_assets(
         &game_project_directory_path.join("res"),
         &build_wasm_dir.join("res"),
@@ -306,6 +312,11 @@ fn copy_game_assets(src_res: &Path, dst_res: &Path) -> Result<()> {
     fs::create_dir_all(dst_parent)?;
     fs_extra::dir::copy(src_res, dst_parent, &CopyOptions::new().overwrite(true))
         .with_context(|| format!("Failed to copy game res/ from {src_res:?} to {dst_res:?}"))?;
+    // Cook-time cache: build tooling, not a served asset.
+    let cook_cache = dst_res.join(pill_assets::COOK_TIMES_FILE);
+    if cook_cache.exists() {
+        fs::remove_file(&cook_cache).with_context(|| format!("Failed to remove {cook_cache:?}"))?;
+    }
     Ok(())
 }
 
