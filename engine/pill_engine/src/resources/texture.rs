@@ -195,7 +195,10 @@ impl Resource for Texture {
             ResourceLoader::Path(path) => {
                 let base = engine.game_resources_directory_path.join(path);
                 let cooked_tex_path = base.with_extension("cooked_tex");
-                if cooked_tex_path.exists() {
+                // The mounted asset pack wins over the cooked file on disk
+                if let Some(bytes) = engine.packed_asset(&path.with_extension("cooked_tex")) {
+                    owned(decode_cooked_tex(&bytes)?)
+                } else if cooked_tex_path.exists() {
                     let bytes =
                         std::fs::read(&cooked_tex_path).map_err(|e| -> pill_core::PillError {
                             format!("Failed to read texture {cooked_tex_path:?}: {e}").into()

@@ -40,7 +40,11 @@ pub fn build(
 
     prepare_scratch_crate(&wasm_template_dir, &scratch_pill_web_app_dir)?;
     embed_game_config(game_project_directory_path, &scratch_pill_web_app_dir)?;
-    rewrite_scratch_manifest(&scratch_pill_web_app_dir, game_project_directory_path)?;
+    rewrite_scratch_manifest(
+        &scratch_pill_web_app_dir,
+        game_project_directory_path,
+        compile_mode,
+    )?;
     run_wasm_pack(compile_mode, &scratch_pill_web_app_dir, &scratch_pkg_dir)?;
     copy_build_outputs(
         &scratch_pkg_dir,
@@ -146,7 +150,11 @@ fn embed_game_config(game_dir: &Path, scratch_pill_web_app_dir: &Path) -> Result
     Ok(())
 }
 
-fn rewrite_scratch_manifest(scratch_pill_web_app_dir: &Path, game_dir: &Path) -> Result<()> {
+fn rewrite_scratch_manifest(
+    scratch_pill_web_app_dir: &Path,
+    game_dir: &Path,
+    compile_mode: &CompileMode,
+) -> Result<()> {
     let engine = get_path(Location::EngineCrates);
     let pill_engine = cargo_path(&engine.join("pill_engine"));
     let pill_core = cargo_path(&engine.join("pill_core"));
@@ -169,8 +177,9 @@ fn rewrite_scratch_manifest(scratch_pill_web_app_dir: &Path, game_dir: &Path) ->
         }
     })?;
 
-    // Append what the template omits: the pill_game dep, [workspace] (stops cargo walking up;
-    // resolver matches engine), and the size-optimized release profile.
+    // Append what the template omits: the pill_game dep (release drops the game's default
+    // features, e.g. editor/debug tooling), [workspace] (stops cargo walking up; resolver matches
+    // engine), the size-optimized release profile, and optimized build scripts (asset baking).
     let mut f = OpenOptions::new()
         .append(true)
         .open(&manifest)
@@ -178,7 +187,7 @@ fn rewrite_scratch_manifest(scratch_pill_web_app_dir: &Path, game_dir: &Path) ->
     write!(
         f,
         concat!(
-            "\npill_game = {{ path = \"{pill_game}\" }}\n",
+            "\npill_game = {{ path = \"{pill_game}\"{game_features} }}\n",
             "\n[workspace]\nresolver = \"2\"\n",
             "\n[profile.release]\n",
             "opt-level = \"z\"\n",
@@ -186,12 +195,19 @@ fn rewrite_scratch_manifest(scratch_pill_web_app_dir: &Path, game_dir: &Path) ->
             "codegen-units = 1\n",
             "panic = \"abort\"\n",
             "strip = true\n",
+            "\n[profile.release.build-override]\nopt-level = 3\n",
+            "\n[profile.dev.build-override]\nopt-level = 3\n",
             "\n[package.metadata.wasm-pack.profile.release]\n",
             "wasm-opt = [\"-Oz\", \"--strip-debug\", \"--strip-producers\", \"--enable-nontrapping-float-to-int\", \"--enable-bulk-memory\", \"--enable-sign-ext\", \"--enable-mutable-globals\", \"--enable-reference-types\"]\n",
             "\n[target.'cfg(target_arch = \"wasm32\")'.dependencies]\n",
             "lol_alloc = \"0.4\"\n",
         ),
         pill_game = pill_game,
+        game_features = if *compile_mode == CompileMode::Release {
+            ", default-features = false"
+        } else {
+            ""
+        },
     )
     .context("Failed to append to scratch Cargo.toml")?;
 

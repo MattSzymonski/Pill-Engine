@@ -71,4 +71,6 @@ obj_loading = ["dep:tobj"]
 gltf_loading = ["dep:goth-gltf", "dep:zune-jpeg", "dep:zune-png", "dep:pill_assets"]
 # Runtime IBL bake (equirect → diffuse/specular), shared with the build-time cooker.
 ibl_bake = ["dep:pill_assets"]
+# Embedded PPAK asset pack (`Engine::mount_asset_pack`); path-based resources load from it first.
+asset_pack = ["dep:pill_assets"]
 all = ["game", "internal", "networking"]

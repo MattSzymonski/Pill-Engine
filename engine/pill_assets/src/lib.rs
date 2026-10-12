@@ -16,6 +16,9 @@
 // feature can compile these into a game binary.
 pub mod convert;
 pub mod ibl;
+// Asset pack (PPAK): reader + decoders are wasm-safe; the writer needs feature `encode`.
+pub mod pak_codec;
+pub mod ppak;
 
 // --- Build-time filesystem pipeline (feature `build`, the default) ---
 
@@ -117,6 +120,9 @@ mod util;
 
 #[cfg(feature = "build")]
 pub use pipeline::{Pipeline, Rule, Stats};
+pub use ppak::Ppak;
+#[cfg(feature = "encode")]
+pub use ppak::{pack_sources, write_pack_for_build};
 
 #[cfg(feature = "build")]
 pub use rules::{

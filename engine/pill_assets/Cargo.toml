@@ -12,6 +12,14 @@ bytemuck = { version = "1.4", features = ["derive"] }
 # Radiance HDR decoder for `ibl::equirect_from_hdr` (build-time and runtime; wasm-safe).
 zune-hdr = "0.4"
 
+# Asset pack decoders (pure Rust, wasm-safe).
+brotli-decompressor = "5"
+image-webp = "0.2"
+
+# Pack-time encoders (libwebp is C): only for build scripts that write an asset pack.
+brotli = { version = "8", optional = true }
+webp = { version = "0.3", optional = true }
+
 # Build-time-only (filesystem Rules); not compiled into wasm runtime builds.
 glob = { version = "0.3", optional = true }
 png = { version = "0.17", optional = true }
@@ -22,3 +30,5 @@ gltf = { version = "1", default-features = false, features = ["utils", "names"],
 default = ["build"]
 # Filesystem asset pipeline (HLSL→WGSL, glb/obj/png/hdr/equirect cooking). Used by build.rs / launcher.
 build = ["dep:glob", "dep:png", "dep:tobj", "dep:gltf", "gltf/import"]
+# Asset pack writer (`pack_sources`, `write_pack_for_build`) for game build scripts.
+encode = ["build", "dep:brotli", "dep:webp"]
