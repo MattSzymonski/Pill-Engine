@@ -38,13 +38,16 @@ struct Scene {
 [[vk::binding(6, 1)]] Texture2D    emissive_texture;
 [[vk::binding(7, 1)]] SamplerState emissive_sampler;
 
-// PBR params UBO (set 2) — 32 bytes, mirrors MaterialParams in renderer_material.rs.
-// Each float3 is followed by a float so both 16-byte rows are fully packed (std140).
+// PBR params UBO (set 2) — 48 bytes, mirrors MaterialParams in renderer_material.rs.
+// Each float3 is followed by a float so all 16-byte rows are fully packed (std140).
 struct MaterialParams {
     float3 base_color_factor;
     float  roughness_factor;
     float3 emissive_factor;
     float  metallic_factor;
+    float  clearcoat;           // coat weight, 0 = no coat
+    float  clearcoat_roughness; // perceptual
+    float2 _padding;
 };
 [[vk::binding(0, 2)]] ConstantBuffer<MaterialParams> material;
 
@@ -83,6 +86,27 @@ float3 fresnel_schlick_roughness(float cos_theta, float3 base_reflectivity, floa
     return base_reflectivity + (max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), base_reflectivity) - base_reflectivity) * pow(1.0 - cos_theta, 5.0);
 }
 
+
+// Kelemen visibility: cheaper than Smith, enough for a thin dielectric coat (Filament)
+float visibility_kelemen(float light_dot_half) {
+    return 0.25 / max(light_dot_half * light_dot_half, 1e-7);
+}
+
+// Clear-coat specular lobe of one light: GGX D, Kelemen V, Schlick F with F0 = coat weight
+float3 clearcoat_directional_light(
+    float3 normal, float3 view_direction, float weight, float roughness,
+    float3 light_direction_to_surface, float4 light_color
+) {
+    float3 light_direction  = normalize(-light_direction_to_surface);
+    float3 half_vector      = normalize(view_direction + light_direction);
+    float  normal_dot_light = max(dot(normal, light_direction), 0.0);
+    float  light_dot_half   = max(dot(light_direction, half_vector), 0.0);
+    float  distribution     = distribution_ggx(normal, half_vector, roughness);
+    float  fresnel          = weight + (1.0 - weight) * pow(1.0 - light_dot_half, 5.0);
+    // The grazing Fresnel term does not vanish at weight 0, so the weight also gates the lobe
+    return distribution * visibility_kelemen(light_dot_half) * fresnel * weight
+         * light_color.w * light_color.xyz * normal_dot_light;
+}
 
 float3 accumulate_directional_light(
     float3 normal, float3 view_direction, float3 base_reflectivity,
@@ -128,6 +152,12 @@ float4 fs_main(
     outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, scene.light_direction0.xyz, scene.light_color0);
     outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, scene.light_direction1.xyz, scene.light_color1);
     outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, scene.light_direction2.xyz, scene.light_color2);
+    if (material.clearcoat > 0.0) {
+        float coat_roughness = clamp(material.clearcoat_roughness, 0.045, 0.99);
+        outgoing_radiance += clearcoat_directional_light(normal, view_direction, material.clearcoat, coat_roughness, scene.light_direction0.xyz, scene.light_color0);
+        outgoing_radiance += clearcoat_directional_light(normal, view_direction, material.clearcoat, coat_roughness, scene.light_direction1.xyz, scene.light_color1);
+        outgoing_radiance += clearcoat_directional_light(normal, view_direction, material.clearcoat, coat_roughness, scene.light_direction2.xyz, scene.light_color2);
+    }
     // Diffuse IBL ambient.
     float3 specular_factor = fresnel_schlick(max(dot(normal, view_direction), 0.0), base_reflectivity);
     float3 diffuse_factor  = (float3(1.0, 1.0, 1.0) - specular_factor) * (1.0 - metallic);

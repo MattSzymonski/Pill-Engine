@@ -10,7 +10,7 @@ use crate::{
 use pill_core::{debug, LogContext, PillError, PillStyle, PillTypeMapKey, RendererError, Result};
 
 /// Material parameter uniform (bind group 2). Mirrors `MaterialParams` in pbr_opaque_fragment.hlsl:
-/// two fully packed 16-byte std140 rows.
+/// three fully packed 16-byte std140 rows.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct MaterialParams {
@@ -18,6 +18,9 @@ pub(crate) struct MaterialParams {
     pub(crate) roughness: f32,
     pub(crate) emissive: [f32; 3],
     pub(crate) metallic: f32,
+    pub(crate) clearcoat: f32,
+    pub(crate) clearcoat_roughness: f32,
+    pub(crate) _padding: [f32; 2],
 }
 
 /// Renderer textures of a material; `None` falls back to the engine default texture of that slot.
