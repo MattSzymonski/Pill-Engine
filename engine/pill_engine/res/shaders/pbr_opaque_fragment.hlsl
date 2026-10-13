@@ -4,8 +4,6 @@
 struct Camera {
     float4                position;
     column_major float4x4 view_projection;
-    float3                fog_color;
-    float                 fog_density;
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Camera> camera;
 
@@ -16,6 +14,19 @@ struct Camera {
 [[vk::binding(4, 0)]] SamplerState prefilter_sampler;
 [[vk::binding(5, 0)]] Texture2D    brdf_lut_texture;
 [[vk::binding(6, 0)]] SamplerState brdf_lut_sampler;
+
+// Scene globals (set 0, binding 7) — mirrors SceneUniform in scene_uniform.rs; all float4 rows.
+struct Scene {
+    float4 fog_color_density; // xyz = fog color, w = fog density
+    float4 ibl_intensity;     // x
+    float4 light_direction0;  // xyz = direction from the light toward the scene
+    float4 light_color0;      // rgb = color, w = intensity
+    float4 light_direction1;
+    float4 light_color1;
+    float4 light_direction2;
+    float4 light_color2;
+};
+[[vk::binding(7, 0)]] ConstantBuffer<Scene> scene;
 
 // PBR material textures (set 1) — bindings match RendererMaterial texture layout (0-7).
 [[vk::binding(0, 1)]] Texture2D    base_color_texture;
@@ -41,14 +52,6 @@ static const float PI                 = 3.14159265359;
 static const float MAX_REFLECTION_LOD = 4.0;
 
 #include "include/equirect.hlsl"
-
-// Camera at +Z looking -Z (glTF default). Z components flipped vs. -Z camera setup.
-static const float3 LIGHT_DIR0 = float3( 0.38, -0.38, -0.84); // key: behind-camera, upper-left
-static const float3 LIGHT_DIR1 = float3(-0.50,  0.50,  0.71); // rim: front upper-right
-static const float3 LIGHT_DIR2 = float3( 0.00, -1.00,  0.00); // bounce: from below
-static const float4 LIGHT_COL0 = float4(1.0, 0.98, 0.95,  2.2); // near-neutral key
-static const float4 LIGHT_COL1 = float4(0.6, 0.65, 1.00,  0.8); // cool rim
-static const float4 LIGHT_COL2 = float4(0.8, 0.80, 0.80,  0.3); // neutral bounce
 
 float distribution_ggx(float3 normal, float3 half_vector, float roughness) {
     // Add epsilon to avoid singularities at very low roughness.
@@ -122,23 +125,24 @@ float4 fs_main(
     float3 view_direction    = normalize(camera.position.xyz - world_position);
     float3 base_reflectivity = lerp(float3(0.04, 0.04, 0.04), albedo, float3(metallic, metallic, metallic));
     float3 outgoing_radiance = float3(0.0, 0.0, 0.0);
-    outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, LIGHT_DIR0, LIGHT_COL0);
-    outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, LIGHT_DIR1, LIGHT_COL1);
-    outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, LIGHT_DIR2, LIGHT_COL2);
+    outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, scene.light_direction0.xyz, scene.light_color0);
+    outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, scene.light_direction1.xyz, scene.light_color1);
+    outgoing_radiance += accumulate_directional_light(normal, view_direction, base_reflectivity, albedo, roughness, metallic, scene.light_direction2.xyz, scene.light_color2);
     // Diffuse IBL ambient.
     float3 specular_factor = fresnel_schlick(max(dot(normal, view_direction), 0.0), base_reflectivity);
     float3 diffuse_factor  = (float3(1.0, 1.0, 1.0) - specular_factor) * (1.0 - metallic);
     float3 irradiance      = irradiance_texture.Sample(irradiance_sampler, dir_to_equirect_uv(normal)).rgb;
-    float3 ambient_diffuse = diffuse_factor * irradiance * albedo;
+    float3 ambient_diffuse = diffuse_factor * irradiance * albedo * scene.ibl_intensity.x;
     // Specular IBL.
     float3 reflection        = reflect(-view_direction, normal);
     float3 prefiltered_color = prefilter_texture.SampleLevel(prefilter_sampler, dir_to_equirect_uv(reflection), roughness * MAX_REFLECTION_LOD).rgb;
     float2 environment_brdf  = brdf_lut_texture.Sample(brdf_lut_sampler, float2(max(dot(normal, view_direction), 0.0), roughness)).rg;
     float3 fresnel           = fresnel_schlick_roughness(max(dot(normal, view_direction), 0.0), base_reflectivity, roughness);
-    float3 specular_ibl      = prefiltered_color * (fresnel * environment_brdf.x + environment_brdf.y);
+    float3 specular_ibl      = prefiltered_color * (fresnel * environment_brdf.x + environment_brdf.y) * scene.ibl_intensity.x;
     float3 emissive = emissive_texture.Sample(emissive_sampler, texture_coordinates).rgb * material.emissive_factor;
     float3 color = outgoing_radiance + ambient_diffuse + specular_ibl + emissive;
     float  distance = length(camera.position.xyz - world_position);
-    float  fog      = 1.0 - exp(-camera.fog_density * camera.fog_density * distance * distance);
-    return float4(lerp(color, camera.fog_color, fog), 1.0);
+    float  fog_density = scene.fog_color_density.w;
+    float  fog      = 1.0 - exp(-fog_density * fog_density * distance * distance);
+    return float4(lerp(color, scene.fog_color_density.xyz, fog), 1.0);
 }

@@ -8,6 +8,7 @@ mod pass_pbr_opaque;
 mod pass_tonemap;
 mod render_queue;
 mod renderer;
+mod scene_uniform;
 
 // --- Use ---
 
@@ -23,6 +24,7 @@ pub use self::dummy_renderer::DummyRenderer;
 pub use pass_egui::PassEgui;
 pub use pass_pbr_opaque::PassPBROpaque;
 pub use pass_tonemap::PassTonemap;
+pub(crate) use scene_uniform::SceneUniform;
 
 pub use render_queue::{
     compose_render_queue_key, decompose_render_queue_key, RenderQueueKey, RenderQueueKeyFields,

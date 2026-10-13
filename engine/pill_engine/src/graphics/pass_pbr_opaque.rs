@@ -10,7 +10,8 @@ use crate::{
     graphics::{
         camera_forward, camera_view_projection, decompose_render_queue_key, BufferDesc,
         FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, PipelineDesc, RenderQueueKey,
-        RendererMaterialHandle, RendererMeshHandle, ShaderDesc, TextureData, WorldQuery,
+        RendererMaterialHandle, RendererMeshHandle, SceneUniform, ShaderDesc, TextureData,
+        WorldQuery,
     },
     renderer::resources::{
         material_params_layout_entries, material_textures_layout_entries, RendererMaterial,
@@ -20,14 +21,12 @@ use crate::{
 use pill_core::{error, LogContext, Matrix4f, PillSlotMapKey, Result, Vector3f};
 use std::num::NonZeroU32;
 
-/// Camera uniform layout: position (vec4) + view-projection matrix (mat4x4) + fog.
+/// Camera uniform layout: position (vec4) + view-projection matrix (mat4x4).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     position: [f32; 4],
     view_projection_matrix: [[f32; 4]; 4],
-    fog_color: [f32; 3], // packed with fog_density for 16-byte alignment
-    fog_density: f32,
 }
 
 impl CameraUniform {
@@ -35,8 +34,6 @@ impl CameraUniform {
         Self {
             position: [0.0; 4],
             view_projection_matrix: Matrix4f::IDENTITY.to_cols_array_2d(),
-            fog_color: [1.0; 3],
-            fog_density: 0.0,
         }
     }
 
@@ -114,6 +111,7 @@ struct BgSubState {
 struct PassPBROpaqueState {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
+    scene_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     pipeline: Pipeline,
     ibl_sampler: wgpu::Sampler,
@@ -143,13 +141,14 @@ fn view_or_fallback(
         .ok_or_else(|| format!("PassPBROpaque: default {label} texture missing").into())
 }
 
-/// Builds the globals bind group (camera UBO + IBL irradiance/prefilter/BRDF-LUT views).
+/// Builds the globals bind group (camera UBO + IBL irradiance/prefilter/BRDF-LUT views + scene UBO).
 /// Shared by init() and the per-frame rebuild-on-change path in draw().
 #[allow(clippy::too_many_arguments)]
 fn build_globals_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     camera_buffer: &wgpu::Buffer,
+    scene_buffer: &wgpu::Buffer,
     irradiance_view: &wgpu::TextureView,
     prefilter_view: &wgpu::TextureView,
     brdf_lut_view: &wgpu::TextureView,
@@ -188,6 +187,10 @@ fn build_globals_bind_group(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: wgpu::BindingResource::Sampler(brdf_lut_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: scene_buffer.as_entire_binding(),
             },
         ],
     })
@@ -277,7 +280,7 @@ impl Pass for PassPBROpaque {
 
     fn init(&mut self, renderer: &mut dyn PillRenderer) -> Result<()> {
         let bind_groups: Vec<Vec<wgpu::BindGroupLayoutEntry>> = vec![
-            // 0: globals (camera + IBL irradiance + prefilter + BRDF LUT)
+            // 0: globals (camera + IBL irradiance + prefilter + BRDF LUT + scene)
             vec![
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -335,6 +338,16 @@ impl Pass for PassPBROpaque {
                     binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -402,6 +415,12 @@ impl Pass for PassPBROpaque {
                 mapped_at_creation: false,
             })
         };
+
+        let scene_buffer = renderer.create_buffer(BufferDesc {
+            label: Some("pass_pbr_opaque_scene_buffer"),
+            byte_size: std::mem::size_of::<SceneUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })?;
 
         let per_draw_buffer = renderer.create_buffer(BufferDesc {
             label: Some("pass_pbr_opaque_per_draw"),
@@ -478,6 +497,7 @@ impl Pass for PassPBROpaque {
             renderer.get_device(),
             &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_GLOBALS],
             &camera_buffer,
+            &scene_buffer,
             &irradiance_view,
             &prefilter_view,
             &brdf_lut_view,
@@ -605,6 +625,7 @@ impl Pass for PassPBROpaque {
         self.state = Some(PassPBROpaqueState {
             camera_uniform: CameraUniform::new(),
             camera_buffer,
+            scene_buffer,
             globals_bind_group,
             pipeline,
             ibl_sampler,
@@ -652,6 +673,7 @@ impl Pass for PassPBROpaque {
                     device,
                     &state.pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_GLOBALS],
                     &state.camera_buffer,
+                    &state.scene_buffer,
                     &irradiance_view,
                     &prefilter_view,
                     &brdf_lut_view,
@@ -686,21 +708,22 @@ impl Pass for PassPBROpaque {
 
         let (active_camera_component, active_camera_transform) = world.active_camera()?;
 
-        // Update camera uniform and write to GPU buffer. MVP = viewProjection·model is computed
-        // in the vertex shader, so the CPU never multiplies per-entity matrices.
-        let fog_color = render_state.fog_color;
-        let fog_density = render_state.fog_density;
+        // Update camera and scene uniforms. MVP = viewProjection·model is computed in the vertex
+        // shader, so the CPU never multiplies per-entity matrices.
         {
             let state = get_state(self);
             state
                 .camera_uniform
                 .update_data(active_camera_component, active_camera_transform);
-            state.camera_uniform.fog_color = fog_color;
-            state.camera_uniform.fog_density = fog_density;
             renderer.get_queue().write_buffer(
                 &state.camera_buffer,
                 0,
                 bytemuck::bytes_of(&state.camera_uniform),
+            );
+            renderer.get_queue().write_buffer(
+                &state.scene_buffer,
+                0,
+                bytemuck::bytes_of(&SceneUniform::from_render_state(render_state)),
             );
         }
 

@@ -14,6 +14,15 @@ pub enum Tonemap {
     Reinhard { white_point: f32 },
 }
 
+/// Directional light; `direction` points from the light toward the scene.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectionalLight {
+    pub direction: [f32; 3],
+    /// Linear RGB, multiplied by `intensity`.
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
 /// Engine-owned (always present, cannot be removed or constructed by games); games set the
 /// public environment, IBL, fog and tonemap fields.
 pub struct RenderStateComponent {
@@ -35,6 +44,10 @@ pub struct RenderStateComponent {
     /// density 0 disables fog.
     pub fog_color: [f32; 3],
     pub fog_density: f32,
+    /// Scales both IBL terms (diffuse irradiance and specular reflection); 0 = direct light only.
+    pub ibl_intensity: f32,
+    /// Key, rim and bounce lights of the PBR passes.
+    pub lights: [DirectionalLight; 3],
     pub tonemap: Tonemap,
 }
 
@@ -53,6 +66,25 @@ impl RenderStateComponent {
             ibl_brdf_lut: PassTextureHandle::default(),
             fog_color: [0.0, 0.0, 0.0],
             fog_density: 0.0,
+            ibl_intensity: 1.0,
+            // Key behind the camera upper-left, cool rim front upper-right, neutral bounce from below
+            lights: [
+                DirectionalLight {
+                    direction: [0.38, -0.38, -0.84],
+                    color: [1.0, 0.98, 0.95],
+                    intensity: 2.2,
+                },
+                DirectionalLight {
+                    direction: [-0.50, 0.50, 0.71],
+                    color: [0.6, 0.65, 1.0],
+                    intensity: 0.8,
+                },
+                DirectionalLight {
+                    direction: [0.0, -1.0, 0.0],
+                    color: [0.8, 0.8, 0.8],
+                    intensity: 0.3,
+                },
+            ],
             tonemap: Tonemap::Reinhard {
                 white_point: f32::INFINITY,
             },
