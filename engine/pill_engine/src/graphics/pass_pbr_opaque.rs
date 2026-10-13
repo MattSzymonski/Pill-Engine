@@ -1,6 +1,7 @@
 use crate::config::{
-    BACKGROUND_FRAGMENT_SHADER, BACKGROUND_VERTEX_SHADER, DEFAULT_EQUIRECT_FALLBACK_PIXEL,
-    DEPTH_TARGET_FORMAT, HDR_TARGET_FORMAT, PBR_OPAQUE_FRAGMENT_SHADER, PBR_OPAQUE_VERTEX_SHADER,
+    AMBIENT_TARGET_FORMAT, BACKGROUND_FRAGMENT_SHADER, BACKGROUND_VERTEX_SHADER,
+    DEFAULT_EQUIRECT_FALLBACK_PIXEL, DEPTH_TARGET_FORMAT, HDR_TARGET_FORMAT,
+    PBR_OPAQUE_FRAGMENT_SHADER, PBR_OPAQUE_VERTEX_SHADER, VELOCITY_TARGET_FORMAT,
 };
 use crate::{
     ecs::{
@@ -21,12 +22,14 @@ use crate::{
 use pill_core::{error, LogContext, Matrix4f, PillSlotMapKey, Result, Vector3f};
 use std::num::NonZeroU32;
 
-/// Camera uniform layout: position (vec4) + view-projection matrix (mat4x4).
+/// Camera uniform layout: position (vec4) + view-projection matrices (mat4x4) of this and the
+/// previous frame (motion vectors).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     position: [f32; 4],
     view_projection_matrix: [[f32; 4]; 4],
+    previous_view_projection_matrix: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
@@ -34,6 +37,7 @@ impl CameraUniform {
         Self {
             position: [0.0; 4],
             view_projection_matrix: Matrix4f::IDENTITY.to_cols_array_2d(),
+            previous_view_projection_matrix: Matrix4f::IDENTITY.to_cols_array_2d(),
         }
     }
 
@@ -55,13 +59,50 @@ impl CameraUniform {
     }
 }
 
-/// Per-draw storage entry: raw pos/rot/scale (48 B). GPU builds model = T·R·S and MVP.
+/// Raw transform of one draw: position, rotation (radians), scale; xyz of each row.
+#[repr(C)]
+#[derive(Copy, Clone, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct DrawTransform {
+    position: [f32; 4],
+    rotation: [f32; 4],
+    scale: [f32; 4],
+}
+
+impl DrawTransform {
+    fn from(transform: &TransformComponent) -> Self {
+        Self {
+            position: [
+                transform.position.x,
+                transform.position.y,
+                transform.position.z,
+                0.0,
+            ],
+            // TransformComponent stores degrees; the vertex shader expects radians
+            rotation: [
+                transform.rotation.x.to_radians(),
+                transform.rotation.y.to_radians(),
+                transform.rotation.z.to_radians(),
+                0.0,
+            ],
+            scale: [transform.scale.x, transform.scale.y, transform.scale.z, 0.0],
+        }
+    }
+}
+
+/// Per-draw storage entry (96 B): this and last frame's transform. GPU builds model = T·R·S, MVP
+/// and the motion vector.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct PerDrawStd140 {
-    position: [f32; 4], // xyz
-    rotation: [f32; 4], // xyz, radians
-    scale: [f32; 4],    // xyz
+    current: DrawTransform,
+    previous: DrawTransform,
+}
+
+/// Last frame's transform of an entity slot and the frame it was drawn in.
+#[derive(Clone, Copy)]
+struct PreviousTransform {
+    transform: DrawTransform,
+    frame: u64,
 }
 
 // Per-draw data lives in one storage buffer indexed by instance id (no per-draw dynamic offsets).
@@ -81,7 +122,8 @@ struct DrawBatch {
     count: u32,
 }
 
-/// Camera uniform for the background sub-draw (view direction basis + fov).
+/// Camera uniform for the background sub-draw (view direction basis + fov, and last frame's
+/// view-projection for the sky's motion vectors).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct BgCameraUbo {
@@ -93,6 +135,7 @@ struct BgCameraUbo {
     _pad: f32,
     bg_color: [f32; 3],
     _pad2: f32,
+    previous_view_projection: [[f32; 4]; 4],
 }
 
 /// GPU-side state for the background sub-draw within the PBR render pass.
@@ -226,14 +269,23 @@ fn build_bg_bind_group(
 
 /// Default PBR pass: GGX + IBL, one instanced draw per material/mesh batch.
 /// Background, IBL and fog are read from RenderStateComponent every frame.
+/// Optional extra outputs: screen-space motion vectors (`with_velocity_target`, UV units per frame)
+/// and the indirect (IBL) term alone (`with_ambient_target`, for SSAO).
 pub struct PassPBROpaque {
     color_target: PassTextureHandle,
     depth_target: PassTextureHandle,
+    velocity_target: Option<PassTextureHandle>,
+    ambient_target: Option<PassTextureHandle>,
     // Per-draw storage capacity; at most one instance per entity
     max_instances: usize,
     // [diffuse, specular, brdf_lut] for the first frame's bind group
     initial_ibl: [PassTextureHandle; 3],
     capacity_warned: bool,
+    // Motion history: last frame's transform per entity slot and camera view-projection
+    frame: u64,
+    previous_transforms: Vec<Option<PreviousTransform>>,
+    previous_view_projection: Option<Matrix4f>,
+    motion_history_epoch: u32,
     // Per-frame scratch, capacity reused across frames
     draws: Vec<(RenderQueueKey, PerDrawStd140)>,
     batches: Vec<DrawBatch>,
@@ -254,14 +306,53 @@ impl PassPBROpaque {
         Self {
             color_target,
             depth_target,
+            velocity_target: None,
+            ambient_target: None,
             max_instances,
             initial_ibl,
             capacity_warned: false,
+            frame: 0,
+            previous_transforms: Vec::new(),
+            previous_view_projection: None,
+            motion_history_epoch: 0,
             draws: Vec::with_capacity(max_instances),
             batches: Vec::new(),
             staging_buffer: Vec::with_capacity(max_instances * PER_DRAW_STRIDE_BYTES),
             state: None,
         }
+    }
+
+    /// Also writes motion vectors (VELOCITY_TARGET_FORMAT): UV offset from last frame's position.
+    pub fn with_velocity_target(mut self, target: PassTextureHandle) -> Self {
+        self.velocity_target = Some(target);
+        self
+    }
+
+    /// Also writes the fogged IBL term alone (AMBIENT_TARGET_FORMAT), which SSAO darkens.
+    pub fn with_ambient_target(mut self, target: PassTextureHandle) -> Self {
+        self.ambient_target = Some(target);
+        self
+    }
+
+    /// Color targets in shader output order (color, velocity, ambient); absent outputs are `None`.
+    fn color_targets(&self, blend: wgpu::BlendState) -> [Option<wgpu::ColorTargetState>; 3] {
+        [
+            Some(wgpu::ColorTargetState {
+                format: HDR_TARGET_FORMAT,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            self.velocity_target.map(|_| wgpu::ColorTargetState {
+                format: VELOCITY_TARGET_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            self.ambient_target.map(|_| wgpu::ColorTargetState {
+                format: AMBIENT_TARGET_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+        ]
     }
 }
 
@@ -368,6 +459,7 @@ impl Pass for PassPBROpaque {
             }],
         ];
 
+        let color_targets = self.color_targets(wgpu::BlendState::REPLACE);
         let desc = PipelineDesc {
             label: Some("pass_pbr_opaque_pipeline"),
             vs: ShaderDesc {
@@ -380,11 +472,7 @@ impl Pass for PassPBROpaque {
             },
             vertex_buffers: &[RendererMesh::data_layout_descriptor()],
             bind_groups,
-            targets: &[Some(wgpu::ColorTargetState {
-                format: HDR_TARGET_FORMAT,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &color_targets,
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_TARGET_FORMAT,
                 depth_write_enabled: true,
@@ -538,6 +626,11 @@ impl Pass for PassPBROpaque {
                     count: None,
                 },
             ]];
+            // Same attachments as the scene draw; the sky writes color and velocity, ambient stays 0
+            let mut bg_targets = color_targets.clone();
+            if let Some(ambient) = &mut bg_targets[2] {
+                ambient.write_mask = wgpu::ColorWrites::empty();
+            }
             let bg_pipeline = renderer.create_pipeline(PipelineDesc {
                 label: Some("pass_pbr_opaque_bg_pipeline"),
                 vs: ShaderDesc {
@@ -550,11 +643,7 @@ impl Pass for PassPBROpaque {
                 },
                 vertex_buffers: &[],
                 bind_groups: bg_bind_groups,
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_TARGET_FORMAT,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &bg_targets,
                 // LessEqual + write disabled: fills only pixels where depth == 1.0 (far plane).
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_TARGET_FORMAT,
@@ -708,6 +797,20 @@ impl Pass for PassPBROpaque {
 
         let (active_camera_component, active_camera_transform) = world.active_camera()?;
 
+        // Motion history: a reset (camera cut) makes this frame's previous transforms = current
+        self.frame += 1;
+        if self.motion_history_epoch != render_state.motion_history_epoch {
+            self.motion_history_epoch = render_state.motion_history_epoch;
+            self.previous_transforms.clear();
+            self.previous_view_projection = None;
+        }
+        let view_projection =
+            camera_view_projection(active_camera_component, active_camera_transform);
+        let previous_view_projection = self
+            .previous_view_projection
+            .replace(view_projection)
+            .unwrap_or(view_projection);
+
         // Update camera and scene uniforms. MVP = viewProjection·model is computed in the vertex
         // shader, so the CPU never multiplies per-entity matrices.
         {
@@ -715,6 +818,8 @@ impl Pass for PassPBROpaque {
             state
                 .camera_uniform
                 .update_data(active_camera_component, active_camera_transform);
+            state.camera_uniform.previous_view_projection_matrix =
+                previous_view_projection.to_cols_array_2d();
             renderer.get_queue().write_buffer(
                 &state.camera_buffer,
                 0,
@@ -732,7 +837,12 @@ impl Pass for PassPBROpaque {
         self.draws.clear();
         let transforms = &transform_components.data;
         let mesh_renderings = &mesh_rendering_components.data;
-        for (slot_transform, slot_mesh_rendering) in transforms.iter().zip(mesh_renderings.iter()) {
+        if self.previous_transforms.len() < transforms.len() {
+            self.previous_transforms.resize(transforms.len(), None);
+        }
+        for (slot, (slot_transform, slot_mesh_rendering)) in
+            transforms.iter().zip(mesh_renderings.iter()).enumerate()
+        {
             let Some(transform) = slot_transform else {
                 continue;
             };
@@ -752,23 +862,17 @@ impl Pass for PassPBROpaque {
                 }
                 break;
             }
-            let per_draw = PerDrawStd140 {
-                position: [
-                    transform.position.x,
-                    transform.position.y,
-                    transform.position.z,
-                    0.0,
-                ],
-                // TransformComponent stores degrees; the vertex shader expects radians
-                rotation: [
-                    transform.rotation.x.to_radians(),
-                    transform.rotation.y.to_radians(),
-                    transform.rotation.z.to_radians(),
-                    0.0,
-                ],
-                scale: [transform.scale.x, transform.scale.y, transform.scale.z, 0.0],
+            let current = DrawTransform::from(transform);
+            // An entity not drawn last frame (new, re-shown or a reused slot) has no motion yet
+            let previous = match self.previous_transforms[slot] {
+                Some(previous) if previous.frame + 1 == self.frame => previous.transform,
+                _ => current,
             };
-            self.draws.push((key, per_draw));
+            self.previous_transforms[slot] = Some(PreviousTransform {
+                transform: current,
+                frame: self.frame,
+            });
+            self.draws.push((key, PerDrawStd140 { current, previous }));
         }
         self.draws.sort_unstable_by_key(|(key, _)| *key);
 
@@ -811,20 +915,28 @@ impl Pass for PassPBROpaque {
         let depth_view = renderer
             .get_render_target_view(self.depth_target)
             .expect("PassPBROpaque: depth target missing");
-        let color_view = renderer
-            .get_render_target_view(self.color_target)
-            .expect("PassPBROpaque: color target missing");
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("pass_pbr_opaque_render_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
+        let cleared = |handle: PassTextureHandle| {
+            let view = renderer
+                .get_render_target_view(handle)
+                .expect("PassPBROpaque: color target missing");
+            wgpu::RenderPassColorAttachment {
+                view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            }
+        };
+        let color_attachments = [
+            Some(cleared(self.color_target)),
+            self.velocity_target.map(cleared),
+            self.ambient_target.map(cleared),
+        ];
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("pass_pbr_opaque_render_pass"),
+            color_attachments: &color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
                 depth_ops: Some(wgpu::Operations {
@@ -914,6 +1026,7 @@ impl Pass for PassPBROpaque {
                     None => render_state.background_color,
                 },
                 _pad2: 0.0,
+                previous_view_projection: previous_view_projection.to_cols_array_2d(),
             };
             renderer
                 .get_queue()

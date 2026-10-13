@@ -2,10 +2,13 @@
 
 #[cfg(feature = "headless")]
 mod dummy_renderer;
+mod fullscreen;
 #[cfg(feature = "ui")]
 mod pass_egui;
+mod pass_motion_blur;
 mod pass_pbr_opaque;
 mod pass_tonemap;
+mod projection;
 mod render_queue;
 mod renderer;
 mod scene_uniform;
@@ -22,6 +25,7 @@ pub use renderer::{
 pub use self::dummy_renderer::DummyRenderer;
 #[cfg(feature = "ui")]
 pub use pass_egui::PassEgui;
+pub use pass_motion_blur::PassMotionBlur;
 pub use pass_pbr_opaque::PassPBROpaque;
 pub use pass_tonemap::PassTonemap;
 pub(crate) use scene_uniform::SceneUniform;

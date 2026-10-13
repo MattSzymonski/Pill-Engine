@@ -331,12 +331,18 @@ impl PillRenderer for Renderer {
     }
 
     fn create_render_target(&mut self, desc: RendererTargetDesc) -> Result<PassTextureHandle> {
-        let (width, height) = match desc.size {
-            TargetSize::Surface => (
+        let divisor = match desc.size {
+            TargetSize::Surface => Some(1),
+            TargetSize::SurfaceDivisor(divisor) => Some(divisor.max(1)),
+            TargetSize::Fixed(..) => None,
+        };
+        let (width, height) = match (desc.size, divisor) {
+            (TargetSize::Fixed(width, height), _) => (width, height),
+            (_, divisor) => divided_size(
                 self.state.surface_configuration.width,
                 self.state.surface_configuration.height,
+                divisor.unwrap_or(1),
             ),
-            TargetSize::Fixed(width, height) => (width, height),
         };
         let texture = RendererTexture::new_render_target(
             &self.state.device,
@@ -346,12 +352,13 @@ impl PillRenderer for Renderer {
             desc.format,
         )?;
         let handle = self.state.pass_textures.insert(texture);
-        if let TargetSize::Surface = desc.size {
+        if let Some(divisor) = divisor {
             self.state.surface_targets.push((
                 handle,
                 SurfaceTarget::Color {
                     name: desc.name,
                     format: desc.format,
+                    divisor,
                 },
             ));
         }
@@ -430,6 +437,7 @@ enum SurfaceTarget {
     Color {
         name: String,
         format: wgpu::TextureFormat,
+        divisor: u32,
     },
     Depth {
         name: String,
@@ -629,13 +637,21 @@ impl State {
             // Passes look target views up every frame, so replacing the textures in place is enough
             for (handle, target) in &self.surface_targets {
                 let texture = match target {
-                    SurfaceTarget::Color { name, format } => RendererTexture::new_render_target(
-                        &self.device,
+                    SurfaceTarget::Color {
                         name,
-                        new_window_size.width,
-                        new_window_size.height,
-                        *format,
-                    ),
+                        format,
+                        divisor,
+                    } => {
+                        let (width, height) =
+                            divided_size(new_window_size.width, new_window_size.height, *divisor);
+                        RendererTexture::new_render_target(
+                            &self.device,
+                            name,
+                            width,
+                            height,
+                            *format,
+                        )
+                    }
                     SurfaceTarget::Depth { name } => RendererTexture::new_depth_texture(
                         &self.device,
                         &self.surface_configuration,
@@ -652,6 +668,11 @@ impl State {
             }
         }
     }
+}
+
+/// Surface size divided by `divisor`, at least 1×1.
+fn divided_size(width: u32, height: u32, divisor: u32) -> (u32, u32) {
+    ((width / divisor).max(1), (height / divisor).max(1))
 }
 
 /// Converts little-endian f32 texels to little-endian f16 (Rgba32Float → Rgba16Float data).

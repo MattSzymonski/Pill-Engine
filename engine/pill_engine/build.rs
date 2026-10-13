@@ -23,6 +23,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         root.join("shaders/include").display()
     );
+    // The directory itself, so a newly added shader re-runs the pipeline
+    println!("cargo:rerun-if-changed={}", root.join("shaders").display());
     for input in &stats.discovered {
         println!("cargo:rerun-if-changed={}", input.display());
     }

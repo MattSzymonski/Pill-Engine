@@ -6,8 +6,8 @@ use crate::{
     },
     engine::Engine,
     graphics::{
-        Pass, PassPBROpaque, PassTonemap, RendererMaterialHandle, RendererTargetDesc,
-        RendererTextureHandle, TargetSize,
+        Pass, PassMotionBlur, PassPBROpaque, PassTextureHandle, PassTonemap,
+        RendererMaterialHandle, RendererTargetDesc, RendererTextureHandle, TargetSize,
     },
     renderer::resources::RendererTexture,
     resources::{MaterialHandle, TextureHandle, TextureType},
@@ -105,6 +105,10 @@ pub const HDR_TARGET_NAME: &str = "hdr_target";
 pub const HDR_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const DEPTH_TARGET_NAME: &str = "depth_target";
 pub const DEPTH_TARGET_FORMAT: wgpu::TextureFormat = RendererTexture::DEPTH_FORMAT;
+/// Motion vectors (UV offset to last frame's position) written by the PBR passes.
+pub const VELOCITY_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+/// Indirect (IBL) lighting alone, written by the PBR opaque pass for SSAO.
+pub const AMBIENT_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 // WGSL is generated from res/shaders/*.hlsl by pill_assets (build.rs)
 pub const PBR_OPAQUE_VERTEX_SHADER: &str = include_str!("../res/shaders/pbr_opaque_vertex.wgsl");
@@ -115,6 +119,8 @@ pub const BACKGROUND_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/background_fragment.wgsl");
 pub const FULLSCREEN_VERTEX_SHADER: &str = include_str!("../res/shaders/fullscreen_vertex.wgsl");
 pub const TONEMAP_FRAGMENT_SHADER: &str = include_str!("../res/shaders/tonemap_fragment.wgsl");
+pub const MOTION_BLUR_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/motion_blur_fragment.wgsl");
 pub const MIP_DOWNSAMPLE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/mip_downsample_fragment.wgsl");
 pub const MIP_DOWNSAMPLE_NORMAL_FRAGMENT_SHADER: &str =
@@ -123,33 +129,85 @@ pub const MIP_DOWNSAMPLE_NORMAL_FRAGMENT_SHADER: &str =
 /// Frame composition: opaque PBR → game-defined passes (`Engine::add_render_pass`) → tonemap → UI.
 /// Creates the shared HDR and depth targets and records them in `RenderStateComponent`.
 pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
-    let hdr_target = engine.renderer.create_render_target(RendererTargetDesc {
-        name: HDR_TARGET_NAME.to_string(),
-        format: HDR_TARGET_FORMAT,
-        size: TargetSize::Surface,
-    })?;
-    let depth_target = engine.renderer.create_depth_texture(DEPTH_TARGET_NAME)?;
+    let (hdr_target, depth_target) = create_scene_targets(engine)?;
+    let mut passes: Vec<Box<dyn Pass>> =
+        vec![Box::new(opaque_pass(engine, hdr_target, depth_target)?)];
+    passes.append(&mut engine.custom_render_passes);
+    passes.push(Box::new(PassTonemap::new(hdr_target)));
+    push_ui_pass(engine, &mut passes)?;
+    Ok(passes)
+}
 
+/// `PassChain::PostFx`: the default chain with post-processing between the scene passes and
+/// tonemapping; parameters live in `RenderStateComponent`:
+/// opaque PBR (+ motion vectors) → game passes → motion blur → tonemap → UI.
+pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
+    let (hdr_target, depth_target) = create_scene_targets(engine)?;
+    let velocity_target = create_target(engine, "velocity_target", VELOCITY_TARGET_FORMAT)?;
+    let motion_blur_target = create_target(engine, "motion_blur_target", HDR_TARGET_FORMAT)?;
+
+    let mut passes: Vec<Box<dyn Pass>> = vec![Box::new(
+        opaque_pass(engine, hdr_target, depth_target)?.with_velocity_target(velocity_target),
+    )];
+    passes.append(&mut engine.custom_render_passes);
+    passes.push(Box::new(PassMotionBlur::new(
+        hdr_target,
+        velocity_target,
+        depth_target,
+        motion_blur_target,
+    )));
+    passes.push(Box::new(PassTonemap::new(motion_blur_target)));
+    push_ui_pass(engine, &mut passes)?;
+    Ok(passes)
+}
+
+/// Surface-sized render target.
+fn create_target(
+    engine: &mut Engine,
+    name: &str,
+    format: wgpu::TextureFormat,
+) -> Result<PassTextureHandle> {
+    engine.renderer.create_render_target(RendererTargetDesc {
+        name: name.to_string(),
+        format,
+        size: TargetSize::Surface,
+    })
+}
+
+/// Shared HDR color and depth targets, recorded in `RenderStateComponent` for game passes.
+fn create_scene_targets(engine: &mut Engine) -> Result<(PassTextureHandle, PassTextureHandle)> {
+    let hdr_target = create_target(engine, HDR_TARGET_NAME, HDR_TARGET_FORMAT)?;
+    let depth_target = engine.renderer.create_depth_texture(DEPTH_TARGET_NAME)?;
     let render_state = engine.get_global_component_mut::<RenderStateComponent>()?;
     render_state.hdr_target = hdr_target;
     render_state.depth_target = depth_target;
-    // Engine defaults, not the game's handles: the pass falls back to these if the game's are invalid
-    let initial_ibl = render_state.default_ibl;
+    Ok((hdr_target, depth_target))
+}
 
+fn opaque_pass(
+    engine: &Engine,
+    hdr_target: PassTextureHandle,
+    depth_target: PassTextureHandle,
+) -> Result<PassPBROpaque> {
+    // Engine defaults, not the game's handles: the pass falls back to these if the game's are invalid
+    let initial_ibl = engine
+        .get_global_component::<RenderStateComponent>()?
+        .default_ibl;
     // At most one mesh instance per entity
     let max_instances = engine
         .config
         .get_int("MAX_ENTITIES")
         .unwrap_or(MAX_ENTITIES as i64) as usize;
-    let mut passes: Vec<Box<dyn Pass>> = vec![Box::new(PassPBROpaque::new(
+    Ok(PassPBROpaque::new(
         hdr_target,
         depth_target,
         max_instances,
         initial_ibl,
-    ))];
-    passes.append(&mut engine.custom_render_passes);
-    passes.push(Box::new(PassTonemap::new(hdr_target)));
+    ))
+}
 
+#[allow(unused_variables)]
+fn push_ui_pass(engine: &Engine, passes: &mut Vec<Box<dyn Pass>>) -> Result<()> {
     #[cfg(feature = "ui")]
     {
         use crate::{ecs::EguiComponent, graphics::PassEgui};
@@ -160,8 +218,7 @@ pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
         let window = engine.renderer.get_window();
         passes.push(Box::new(PassEgui::new(window, client)));
     }
-
-    Ok(passes)
+    Ok(())
 }
 
 // --- Resources ---

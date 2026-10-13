@@ -3,6 +3,7 @@ struct BackgroundCamera {
     float3 up;               float aspect;
     float3 forward;          float _padding;
     float3 background_color;  float _padding_2;
+    column_major float4x4 previous_view_projection;
 };
 [[vk::binding(0, 0)]] ConstantBuffer<BackgroundCamera> camera;
 [[vk::binding(1, 0)]] Texture2D    equirect_texture;
@@ -10,8 +11,14 @@ struct BackgroundCamera {
 
 #include "include/equirect.hlsl"
 
+// Same targets as the PBR pass: color and velocity (ambient is masked off).
+struct FragmentOutput {
+    [[vk::location(0)]] float4 color    : SV_TARGET0;
+    [[vk::location(1)]] float2 velocity : SV_TARGET1;
+};
+
 [shader("fragment")]
-float4 fs_main(float2 normalized_device_coordinates : TEXCOORD0) : SV_Target {
+FragmentOutput fs_main(float2 normalized_device_coordinates : TEXCOORD0) {
     float3 direction = normalize(
         camera.right * (normalized_device_coordinates.x * camera.tangent_half_fov * camera.aspect)
       + camera.up    * (normalized_device_coordinates.y * camera.tangent_half_fov)
@@ -19,5 +26,11 @@ float4 fs_main(float2 normalized_device_coordinates : TEXCOORD0) : SV_Target {
     );
     float2 texture_coordinates = dir_to_equirect_uv(direction);
     float3 sky_color = equirect_texture.Sample(equirect_sampler, texture_coordinates).rgb;
-    return float4(sky_color * camera.background_color, 1.0);
+    // The sky is at infinity: only camera rotation moves it, so project the direction (w = 0)
+    float4 previous_clip = mul(camera.previous_view_projection, float4(direction, 0.0));
+    float2 previous_ndc  = previous_clip.w > 1e-4 ? previous_clip.xy / previous_clip.w : normalized_device_coordinates;
+    FragmentOutput output;
+    output.color    = float4(sky_color * camera.background_color, 1.0);
+    output.velocity = (normalized_device_coordinates - previous_ndc) * float2(0.5, -0.5);
+    return output;
 }

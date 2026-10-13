@@ -204,9 +204,12 @@ pub struct RendererTargetDesc {
     pub size: TargetSize,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum TargetSize {
     /// Matches the surface and is rebuilt (same handle) when the window is resized.
     Surface,
+    /// Surface size divided by n (min 1 px), rebuilt with the surface; for half/quarter-res passes.
+    SurfaceDivisor(u32),
     /// Fixed width and height.
     Fixed(u32, u32),
 }

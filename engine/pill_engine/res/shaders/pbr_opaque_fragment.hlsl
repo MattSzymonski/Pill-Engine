@@ -4,6 +4,7 @@
 struct Camera {
     float4                position;
     column_major float4x4 view_projection;
+    column_major float4x4 previous_view_projection;
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Camera> camera;
 
@@ -126,14 +127,22 @@ float3 accumulate_directional_light(
     return (diffuse_factor * (albedo / PI) + specular) * radiance * max(dot(normal, light_direction), 0.0);
 }
 
+// Targets 1 and 2 exist only when the pass has velocity / ambient targets; otherwise ignored.
+struct FragmentOutput {
+    [[vk::location(0)]] float4 color    : SV_TARGET0;
+    [[vk::location(1)]] float2 velocity : SV_TARGET1; // UV offset to last frame's position
+    [[vk::location(2)]] float4 ambient  : SV_TARGET2; // fogged IBL term alone, darkened by SSAO
+};
+
 [shader("fragment")]
-float4 fs_main(
+FragmentOutput fs_main(
     [[vk::location(0)]] float2 texture_coordinates : TEXCOORD0,
     [[vk::location(1)]] float3 world_position      : TEXCOORD1,
     [[vk::location(2)]] float3 input_normal        : TEXCOORD2,
     [[vk::location(3)]] float3 input_tangent       : TEXCOORD3,
-    [[vk::location(4)]] float3 input_bitangent     : TEXCOORD4
-) : SV_TARGET {
+    [[vk::location(4)]] float3 input_bitangent     : TEXCOORD4,
+    [[vk::location(5)]] float2 velocity            : TEXCOORD5
+) {
     float3 albedo             = base_color_texture.Sample(base_color_sampler, texture_coordinates).rgb * material.base_color_factor;
     float2 metallic_roughness = metallic_roughness_texture.Sample(metallic_roughness_sampler, texture_coordinates).gb;
     // metallic_roughness.x = G channel (roughness 0=smooth, 1=rough); metallic_roughness.y = B channel (metallic 0=dielectric, 1=metal)
@@ -174,5 +183,9 @@ float4 fs_main(
     float  distance = length(camera.position.xyz - world_position);
     float  fog_density = scene.fog_color_density.w;
     float  fog      = 1.0 - exp(-fog_density * fog_density * distance * distance);
-    return float4(lerp(color, scene.fog_color_density.xyz, fog), 1.0);
+    FragmentOutput output;
+    output.color    = float4(lerp(color, scene.fog_color_density.xyz, fog), 1.0);
+    output.velocity = velocity;
+    output.ambient  = float4((ambient_diffuse + specular_ibl) * (1.0 - fog), 0.0);
+    return output;
 }

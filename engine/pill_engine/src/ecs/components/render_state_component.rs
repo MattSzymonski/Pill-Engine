@@ -14,6 +14,16 @@ pub enum Tonemap {
     Reinhard { white_point: f32 },
 }
 
+/// Pass chain the engine builds on the first frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PassChain {
+    /// Opaque PBR → game passes → tonemap.
+    #[default]
+    Default,
+    /// Default chain plus the post-processing passes (see `config::post_fx_pass_chain`).
+    PostFx,
+}
+
 /// Directional light; `direction` points from the light toward the scene.
 #[derive(Clone, Copy, Debug)]
 pub struct DirectionalLight {
@@ -27,6 +37,8 @@ pub struct DirectionalLight {
 /// public environment, IBL, fog and tonemap fields.
 pub struct RenderStateComponent {
     pub(crate) boot_done: bool,
+    /// Chain built on the first frame; set it from `start()`, later changes have no effect.
+    pub pass_chain: PassChain,
     /// Scene color target (HDR_TARGET_FORMAT) shared by scene passes; resolved by the tonemap pass.
     pub(crate) hdr_target: PassTextureHandle,
     /// Scene depth target (DEPTH_TARGET_FORMAT) shared by scene passes.
@@ -49,6 +61,11 @@ pub struct RenderStateComponent {
     /// Key, rim and bounce lights of the PBR passes.
     pub lights: [DirectionalLight; 3],
     pub tonemap: Tonemap,
+    /// PostFx chain: motion blur length as a fraction of the frame's motion (0.5 = 180° shutter,
+    /// 0 = off).
+    pub motion_blur: f32,
+    /// Bumped by `reset_motion_history`; passes drop last frame's transforms when it changes.
+    pub(crate) motion_history_epoch: u32,
 }
 
 impl RenderStateComponent {
@@ -56,6 +73,7 @@ impl RenderStateComponent {
     pub(crate) fn new() -> Self {
         Self {
             boot_done: false,
+            pass_chain: PassChain::Default,
             hdr_target: PassTextureHandle::default(),
             depth_target: PassTextureHandle::default(),
             default_ibl: [PassTextureHandle::default(); 3],
@@ -88,6 +106,8 @@ impl RenderStateComponent {
             tonemap: Tonemap::Reinhard {
                 white_point: f32::INFINITY,
             },
+            motion_blur: 0.5,
+            motion_history_epoch: 0,
         }
     }
 }
@@ -101,6 +121,12 @@ impl RenderStateComponent {
     /// Scene depth target (DEPTH_TARGET_FORMAT) for game-defined passes.
     pub fn depth_target(&self) -> PassTextureHandle {
         self.depth_target
+    }
+
+    /// Next frame renders without motion vectors (previous transforms = current); call on camera
+    /// cuts and teleports so motion blur does not smear across them.
+    pub fn reset_motion_history(&mut self) {
+        self.motion_history_epoch = self.motion_history_epoch.wrapping_add(1);
     }
 }
 
