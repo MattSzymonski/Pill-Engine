@@ -261,7 +261,9 @@ impl Pass for PassSsao {
                 self.output,
             ),
         ];
-        for (label, pipeline, bindings, output) in steps {
+        // Off: only the apply step, which then copies the color through
+        let skipped = if settings.strength <= 0.0 { 3 } else { 0 };
+        for (label, pipeline, bindings, output) in steps.into_iter().skip(skipped) {
             draw_fullscreen(
                 encoder,
                 renderer,

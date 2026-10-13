@@ -228,6 +228,10 @@ impl Pass for PassDepthOfField {
             .as_ref()
             .expect("PassDepthOfField: state not initialized — call init() before draw()");
         let settings = world.get_global::<RenderStateComponent>()?.depth_of_field;
+        // Off: PassMotionBlur skips the composite, so the output is never read
+        if settings.focus_scale == 0.0 {
+            return Ok(());
+        }
         let (camera, _) = world.active_camera()?;
         let [depth_mul, depth_add] = depth_unpack(camera.range.start, camera.range.end);
 

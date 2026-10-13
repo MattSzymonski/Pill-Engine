@@ -189,9 +189,12 @@ impl Pass for PassBloom {
             }),
         );
 
+        // Off: only the composite, which then copies the input through
+        let enabled = render_state.bloom.strength != 0.0;
+
         // Down: input → mip 0 (Karis) → mip 1 → ...
         let mut source = self.input;
-        for (level, &mip) in state.mips.iter().enumerate() {
+        for (level, &mip) in state.mips.iter().enumerate().take_while(|_| enabled) {
             let params = if level == 0 {
                 &state.karis_params
             } else {
@@ -212,7 +215,7 @@ impl Pass for PassBloom {
             source = mip;
         }
         // Up: each level is added onto the next larger one, so mip 0 ends with the whole chain
-        for pair in state.mips.windows(2).rev() {
+        for pair in state.mips.windows(2).rev().take_while(|_| enabled) {
             draw_fullscreen_with_load(
                 encoder,
                 renderer,

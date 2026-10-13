@@ -127,7 +127,9 @@ impl Pass for PassMotionBlur {
             max_samples: self.max_samples,
             depth_mul,
             depth_add,
-            has_depth_of_field: self.depth_of_field.is_some() as u32,
+            has_depth_of_field: (self.depth_of_field.is_some()
+                && render_state.depth_of_field.focus_scale != 0.0)
+                as u32,
             max_radius: self.max_radius,
         };
         renderer
