@@ -6,7 +6,7 @@ use crate::{
         BufferDesc, FrameTarget, Pass, PassPBROpaque, PassTextureHandle, PillRenderer, Pipeline,
         PipelineDesc, RendererTargetDesc, TargetSize, TextureData, WorldQuery,
     },
-    renderer::resources::{RendererMesh, RendererTexture, Vertex},
+    renderer::resources::{MipGenerator, RendererMesh, RendererTexture, Vertex},
     resources::ResourceManager,
 };
 
@@ -424,6 +424,15 @@ impl PillRenderer for Renderer {
         Ok(self.state.pass_textures.insert(texture))
     }
 
+    fn generate_mipmaps(&self, texture: &wgpu::Texture, renormalize: bool) {
+        self.state.mip_generator.generate(
+            &self.state.device,
+            &self.state.queue,
+            texture,
+            renormalize,
+        );
+    }
+
     fn get_texture_view(&self, handle: PassTextureHandle) -> Option<wgpu::TextureView> {
         self.state.pass_textures.get(handle).map(|t| {
             t.texture
@@ -446,6 +455,7 @@ enum SurfaceTarget {
 
 pub struct State {
     pass_textures: PillSlotMap<PassTextureHandle, RendererTexture>,
+    mip_generator: MipGenerator,
     surface_targets: Vec<(PassTextureHandle, SurfaceTarget)>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -612,8 +622,11 @@ impl State {
 
         let pass_textures = PillSlotMap::with_capacity_and_key(10);
 
+        let mip_generator = MipGenerator::new(&device);
+
         Ok(Self {
             pass_textures,
+            mip_generator,
             surface_targets: Vec::new(),
             surface,
             device,

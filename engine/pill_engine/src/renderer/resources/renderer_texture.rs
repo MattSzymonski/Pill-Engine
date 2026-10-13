@@ -6,6 +6,9 @@ use crate::resources::{Resource, ResourceStorage, TextureType};
 
 use pill_core::{PillTypeMapKey, Result};
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 pub struct RendererTexture {
     pub name: String,
     pub texture: wgpu::Texture,
@@ -53,7 +56,7 @@ impl RendererTexture {
             view_formats: &[],
         });
 
-        // Write mip 0, then downsample it into the rest of the chain on the GPU
+        // Write mip 0; the caller fills the rest with PillRenderer::generate_mipmaps
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -69,8 +72,6 @@ impl RendererTexture {
             },
             size,
         );
-        let renormalize = matches!(texture_type, TextureType::Normal);
-        generate_mipmaps(device, queue, &texture, format, mip_count, renormalize);
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -268,150 +269,180 @@ fn mip_level_count(width: u32, height: u32) -> u32 {
     u32::BITS - width.max(height).max(1).leading_zeros()
 }
 
-/// Fills mips 1.. of `texture` from mip 0: each level is a full-screen draw sampling the previous
+/// Fills mips 1.. of a texture from mip 0: each level is a full-screen draw sampling the previous
 /// one bilinearly (wgpu has no glGenerateMipmap). Normal maps are renormalized per level.
-fn generate_mipmaps(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    format: wgpu::TextureFormat,
-    mip_count: u32,
-    renormalize: bool,
-) {
-    if mip_count <= 1 {
-        return;
-    }
+/// Owned by the renderer, so shaders and layouts are built once and a pipeline once per
+/// (format, renormalize).
+pub(crate) struct MipGenerator {
+    vertex_module: wgpu::ShaderModule,
+    fragment_module: wgpu::ShaderModule,
+    normal_fragment_module: wgpu::ShaderModule,
+    bind_group_layout: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+    sampler: wgpu::Sampler,
+    pipelines: RefCell<HashMap<(wgpu::TextureFormat, bool), wgpu::RenderPipeline>>,
+}
 
-    let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("mip_downsample_vertex"),
-        source: wgpu::ShaderSource::Wgsl(FULLSCREEN_VERTEX_SHADER.into()),
-    });
-    let fragment_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("mip_downsample_fragment"),
-        source: wgpu::ShaderSource::Wgsl(
-            if renormalize {
-                MIP_DOWNSAMPLE_NORMAL_FRAGMENT_SHADER
-            } else {
-                MIP_DOWNSAMPLE_FRAGMENT_SHADER
-            }
-            .into(),
-        ),
-    });
-
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("mip_downsample_bind_group_layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("mip_downsample_pipeline_layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("mip_downsample_pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &vertex_module,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &fragment_module,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
-
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("mip_downsample_encoder"),
-    });
-
-    for mip in 1..mip_count {
-        let source_view = texture.create_view(&wgpu::TextureViewDescriptor {
-            base_mip_level: mip - 1,
-            mip_level_count: Some(1),
-            ..Default::default()
-        });
-        let destination_view = texture.create_view(&wgpu::TextureViewDescriptor {
-            base_mip_level: mip,
-            mip_level_count: Some(1),
-            ..Default::default()
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mip_downsample_bind_group"),
-            layout: &bind_group_layout,
+impl MipGenerator {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        let shader = |label: &str, source: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mip_downsample_bind_group_layout"),
             entries: &[
-                wgpu::BindGroupEntry {
+                wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source_view),
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
                 },
-                wgpu::BindGroupEntry {
+                wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
                 },
             ],
         });
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("mip_downsample_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &destination_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mip_downsample_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
         });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.draw(0..3, 0..1);
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            vertex_module: shader("mip_downsample_vertex", FULLSCREEN_VERTEX_SHADER),
+            fragment_module: shader("mip_downsample_fragment", MIP_DOWNSAMPLE_FRAGMENT_SHADER),
+            normal_fragment_module: shader(
+                "mip_downsample_normal_fragment",
+                MIP_DOWNSAMPLE_NORMAL_FRAGMENT_SHADER,
+            ),
+            bind_group_layout,
+            pipeline_layout,
+            sampler,
+            pipelines: RefCell::new(HashMap::new()),
+        }
     }
 
-    queue.submit(Some(encoder.finish()));
+    fn pipeline(
+        &self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        renormalize: bool,
+    ) -> wgpu::RenderPipeline {
+        self.pipelines
+            .borrow_mut()
+            .entry((format, renormalize))
+            .or_insert_with(|| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("mip_downsample_pipeline"),
+                    layout: Some(&self.pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &self.vertex_module,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: if renormalize {
+                            &self.normal_fragment_module
+                        } else {
+                            &self.fragment_module
+                        },
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
+                    cache: None,
+                })
+            })
+            .clone()
+    }
+
+    /// Fills every mip below 0 of `texture` (created with RENDER_ATTACHMENT usage).
+    pub(crate) fn generate(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        renormalize: bool,
+    ) {
+        let mip_count = texture.mip_level_count();
+        if mip_count <= 1 {
+            return;
+        }
+        let pipeline = self.pipeline(device, texture.format(), renormalize);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mip_downsample_encoder"),
+        });
+        for mip in 1..mip_count {
+            let source_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: mip - 1,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let destination_view = texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                ..Default::default()
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mip_downsample_bind_group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&source_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mip_downsample_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &destination_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit(Some(encoder.finish()));
+    }
 }
 
 impl PillTypeMapKey for RendererTexture {

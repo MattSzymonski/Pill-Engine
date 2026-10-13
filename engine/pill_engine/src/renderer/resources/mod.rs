@@ -8,4 +8,5 @@ pub(crate) use renderer_material::{
     MaterialTextures,
 };
 pub use renderer_mesh::{RendererMesh, Vertex};
+pub(crate) use renderer_texture::MipGenerator;
 pub use renderer_texture::RendererTexture;

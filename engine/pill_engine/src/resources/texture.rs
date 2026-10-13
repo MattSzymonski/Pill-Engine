@@ -258,6 +258,10 @@ impl Resource for Texture {
                 self.texture_type,
             )
             .context(error_message)?;
+            engine.renderer.generate_mipmaps(
+                &renderer_texture.texture,
+                matches!(self.texture_type, TextureType::Normal),
+            );
             engine.resource_manager.add_resource(renderer_texture)?;
         }
 

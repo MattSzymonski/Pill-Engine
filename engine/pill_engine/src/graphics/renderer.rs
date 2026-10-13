@@ -331,6 +331,9 @@ pub trait PillRenderer {
         data: TextureData,
     ) -> Result<PassTextureHandle>;
 
+    /// Fills mips 1.. of `texture` (RENDER_ATTACHMENT usage) from mip 0; `renormalize` for normal maps.
+    fn generate_mipmaps(&self, texture: &wgpu::Texture, renormalize: bool);
+
     /// Creates a new `TextureView` for a previously registered texture handle.
     /// Returns `None` if the handle is not found.
     fn get_texture_view(&self, handle: PassTextureHandle) -> Option<wgpu::TextureView>;
