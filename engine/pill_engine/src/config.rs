@@ -6,7 +6,7 @@ use crate::{
     },
     engine::Engine,
     graphics::{
-        Pass, PassMotionBlur, PassPBROpaque, PassTextureHandle, PassTonemap,
+        Pass, PassMotionBlur, PassPBROpaque, PassPBRTranslucent, PassTextureHandle, PassTonemap,
         RendererMaterialHandle, RendererTargetDesc, RendererTextureHandle, TargetSize,
     },
     renderer::resources::RendererTexture,
@@ -140,15 +140,27 @@ pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
 
 /// `PassChain::PostFx`: the default chain with post-processing between the scene passes and
 /// tonemapping; parameters live in `RenderStateComponent`:
-/// opaque PBR (+ motion vectors) → game passes → motion blur → tonemap → UI.
+/// opaque PBR (+ motion vectors) → translucent PBR → game passes → motion blur → tonemap → UI.
 pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
     let (hdr_target, depth_target) = create_scene_targets(engine)?;
     let velocity_target = create_target(engine, "velocity_target", VELOCITY_TARGET_FORMAT)?;
     let motion_blur_target = create_target(engine, "motion_blur_target", HDR_TARGET_FORMAT)?;
 
-    let mut passes: Vec<Box<dyn Pass>> = vec![Box::new(
-        opaque_pass(engine, hdr_target, depth_target)?.with_velocity_target(velocity_target),
-    )];
+    let opaque = opaque_pass(engine, hdr_target, depth_target)?;
+    let translucent = PassPBRTranslucent::new(
+        hdr_target,
+        depth_target,
+        opaque.max_instances(),
+        opaque.initial_ibl(),
+    );
+    let mut passes: Vec<Box<dyn Pass>> = vec![
+        Box::new(
+            opaque
+                .without_translucent()
+                .with_velocity_target(velocity_target),
+        ),
+        Box::new(translucent),
+    ];
     passes.append(&mut engine.custom_render_passes);
     passes.push(Box::new(PassMotionBlur::new(
         hdr_target,

@@ -26,7 +26,7 @@ pub use self::dummy_renderer::DummyRenderer;
 #[cfg(feature = "ui")]
 pub use pass_egui::PassEgui;
 pub use pass_motion_blur::PassMotionBlur;
-pub use pass_pbr_opaque::PassPBROpaque;
+pub use pass_pbr_opaque::{PassPBROpaque, PassPBRTranslucent};
 pub use pass_tonemap::PassTonemap;
 pub(crate) use scene_uniform::SceneUniform;
 

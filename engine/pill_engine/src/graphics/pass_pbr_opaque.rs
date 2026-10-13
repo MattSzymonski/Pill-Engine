@@ -272,6 +272,11 @@ fn build_bg_bind_group(
 /// Optional extra outputs: screen-space motion vectors (`with_velocity_target`, UV units per frame)
 /// and the indirect (IBL) term alone (`with_ambient_target`, for SSAO).
 pub struct PassPBROpaque {
+    // Translucent mode (PassPBRTranslucent): draws only materials with opacity < 1, back to front,
+    // blended over the color target, depth-tested against the opaque depth without writing it
+    translucent: bool,
+    // Opaque mode with a PassPBRTranslucent after it: leave opacity < 1 materials to that pass
+    exclude_translucent: bool,
     color_target: PassTextureHandle,
     depth_target: PassTextureHandle,
     velocity_target: Option<PassTextureHandle>,
@@ -286,8 +291,8 @@ pub struct PassPBROpaque {
     previous_transforms: Vec<Option<PreviousTransform>>,
     previous_view_projection: Option<Matrix4f>,
     motion_history_epoch: u32,
-    // Per-frame scratch, capacity reused across frames
-    draws: Vec<(RenderQueueKey, PerDrawStd140)>,
+    // Per-frame scratch, capacity reused across frames; f32 = squared camera distance (translucent sort)
+    draws: Vec<(RenderQueueKey, f32, PerDrawStd140)>,
     batches: Vec<DrawBatch>,
     staging_buffer: Vec<u8>,
     state: Option<PassPBROpaqueState>,
@@ -304,6 +309,8 @@ impl PassPBROpaque {
     ) -> Self {
         let max_instances = max_instances.max(1);
         Self {
+            translucent: false,
+            exclude_translucent: false,
             color_target,
             depth_target,
             velocity_target: None,
@@ -320,6 +327,20 @@ impl PassPBROpaque {
             staging_buffer: Vec::with_capacity(max_instances * PER_DRAW_STRIDE_BYTES),
             state: None,
         }
+    }
+
+    pub fn max_instances(&self) -> usize {
+        self.max_instances
+    }
+
+    pub fn initial_ibl(&self) -> [PassTextureHandle; 3] {
+        self.initial_ibl
+    }
+
+    /// Skips materials with opacity < 1, for chains where a `PassPBRTranslucent` draws them.
+    pub fn without_translucent(mut self) -> Self {
+        self.exclude_translucent = true;
+        self
     }
 
     /// Also writes motion vectors (VELOCITY_TARGET_FORMAT): UV offset from last frame's position.
@@ -364,9 +385,65 @@ fn get_state(pass: &mut PassPBROpaque) -> &mut PassPBROpaqueState {
         .expect("PassPBROpaque: state not initialized — call init() before draw()")
 }
 
+/// Whether the material of a render key has opacity < 1; a missing material counts as opaque.
+fn is_translucent(world: &WorldQuery<'_>, key: RenderQueueKey) -> bool {
+    let key_fields = decompose_render_queue_key(key);
+    let Some(version) = NonZeroU32::new(key_fields.material_version.into()) else {
+        return false;
+    };
+    let handle = RendererMaterialHandle::new(key_fields.material_index.into(), version);
+    world
+        .resources
+        .get_resource::<RendererMaterial>(&handle)
+        .is_ok_and(|material| material.translucent)
+}
+
+/// Translucent PBR: materials with opacity < 1, sorted back to front and alpha-blended over the
+/// HDR target after the opaque pass, depth-tested against (not writing) the opaque depth. Shares
+/// PassPBROpaque's shaders; writes no motion vectors.
+pub struct PassPBRTranslucent(PassPBROpaque);
+
+impl PassPBRTranslucent {
+    /// Same targets and IBL defaults as the opaque pass it follows.
+    pub fn new(
+        color_target: PassTextureHandle,
+        depth_target: PassTextureHandle,
+        max_instances: usize,
+        initial_ibl: [PassTextureHandle; 3],
+    ) -> Self {
+        let mut pass = PassPBROpaque::new(color_target, depth_target, max_instances, initial_ibl);
+        pass.translucent = true;
+        Self(pass)
+    }
+}
+
+impl Pass for PassPBRTranslucent {
+    fn get_label(&self) -> &str {
+        self.0.get_label()
+    }
+
+    fn init(&mut self, renderer: &mut dyn PillRenderer) -> Result<()> {
+        self.0.init(renderer)
+    }
+
+    fn draw(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        renderer: &mut dyn PillRenderer,
+        frame_target: &FrameTarget,
+        world: &WorldQuery<'_>,
+    ) -> Result<()> {
+        self.0.draw(encoder, renderer, frame_target, world)
+    }
+}
+
 impl Pass for PassPBROpaque {
     fn get_label(&self) -> &str {
-        "pass_pbr_opaque"
+        if self.translucent {
+            "pass_pbr_translucent"
+        } else {
+            "pass_pbr_opaque"
+        }
     }
 
     fn init(&mut self, renderer: &mut dyn PillRenderer) -> Result<()> {
@@ -459,7 +536,11 @@ impl Pass for PassPBROpaque {
             }],
         ];
 
-        let color_targets = self.color_targets(wgpu::BlendState::REPLACE);
+        let color_targets = self.color_targets(if self.translucent {
+            wgpu::BlendState::ALPHA_BLENDING
+        } else {
+            wgpu::BlendState::REPLACE
+        });
         let desc = PipelineDesc {
             label: Some("pass_pbr_opaque_pipeline"),
             vs: ShaderDesc {
@@ -475,7 +556,7 @@ impl Pass for PassPBROpaque {
             targets: &color_targets,
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_TARGET_FORMAT,
-                depth_write_enabled: true,
+                depth_write_enabled: !self.translucent,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -832,8 +913,9 @@ impl Pass for PassPBROpaque {
             );
         }
 
-        // Collect (render key, per-draw) pairs; sorting by key groups them by material, then mesh
-        // (opaque + depth-tested, so draw order doesn't matter)
+        // Collect (render key, per-draw) pairs of this pass's materials. Opaque: sorting by key groups
+        // them by material, then mesh (depth-tested, so order doesn't matter). Translucent: back to
+        // front; equal neighbouring keys still share an instanced draw, which keeps that order.
         self.draws.clear();
         let transforms = &transform_components.data;
         let mesh_renderings = &mesh_rendering_components.data;
@@ -852,6 +934,11 @@ impl Pass for PassPBROpaque {
             let Some(key) = mesh_rendering.render_queue_key else {
                 continue;
             };
+            if (self.translucent || self.exclude_translucent)
+                && is_translucent(world, key) != self.translucent
+            {
+                continue;
+            }
             if self.draws.len() == self.max_instances {
                 if !self.capacity_warned {
                     log::error!(
@@ -872,14 +959,21 @@ impl Pass for PassPBROpaque {
                 transform: current,
                 frame: self.frame,
             });
-            self.draws.push((key, PerDrawStd140 { current, previous }));
+            let distance_squared =
+                (transform.position - active_camera_transform.position).length_squared();
+            self.draws
+                .push((key, distance_squared, PerDrawStd140 { current, previous }));
         }
-        self.draws.sort_unstable_by_key(|(key, _)| *key);
+        if self.translucent {
+            self.draws.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        } else {
+            self.draws.sort_unstable_by_key(|(key, _, _)| *key);
+        }
 
         // One batch per run of equal keys; the key is decoded once per batch
         self.batches.clear();
         self.staging_buffer.clear();
-        for (index, (key, per_draw)) in self.draws.iter().enumerate() {
+        for (index, (key, _, per_draw)) in self.draws.iter().enumerate() {
             self.staging_buffer
                 .extend_from_slice(bytemuck::bytes_of(per_draw));
             if index > 0 && self.draws[index - 1].0 == *key {
@@ -915,6 +1009,12 @@ impl Pass for PassPBROpaque {
         let depth_view = renderer
             .get_render_target_view(self.depth_target)
             .expect("PassPBROpaque: depth target missing");
+        // The translucent pass draws over the opaque pass's color and depth
+        let load = if self.translucent {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
         let cleared = |handle: PassTextureHandle| {
             let view = renderer
                 .get_render_target_view(handle)
@@ -923,7 +1023,7 @@ impl Pass for PassPBROpaque {
                 view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load,
                     store: wgpu::StoreOp::Store,
                 },
             }
@@ -940,7 +1040,11 @@ impl Pass for PassPBROpaque {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: if self.translucent {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(1.0)
+                    },
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -1008,7 +1112,7 @@ impl Pass for PassPBROpaque {
 
         // Background sub-draw: within the same render pass, after opaque geometry.
         // LessEqual depth test + write_enabled=false: fills only pixels where depth == 1.0 (far plane = no geometry).
-        {
+        if !self.translucent {
             let bg = &state_ref.bg;
             let fwd = camera_forward(active_camera_transform);
             let right = fwd.cross(Vector3f::Y).normalize();

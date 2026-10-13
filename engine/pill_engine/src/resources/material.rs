@@ -81,6 +81,10 @@ pub struct Material {
     /// Perceptual roughness of the clear-coat layer.
     #[readonly]
     pub clearcoat_roughness: f32,
+    /// 1 = opaque; below 1 the material is alpha-blended (times the albedo texture's alpha) by the
+    /// translucent PBR pass of `PassChain::PostFx`.
+    #[readonly]
+    pub opacity: f32,
     #[readonly]
     pub albedo_texture: Option<TextureHandle>,
     #[readonly]
@@ -103,6 +107,7 @@ impl Material {
             emissive: Color::new(0.0, 0.0, 0.0),
             clearcoat: 0.0,
             clearcoat_roughness: 0.1,
+            opacity: 1.0,
             albedo_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,
@@ -140,6 +145,11 @@ impl Material {
     pub fn clearcoat(mut self, weight: f32, roughness: f32) -> Self {
         self.clearcoat = weight.clamp(0.0, 1.0);
         self.clearcoat_roughness = roughness.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity.clamp(0.0, 1.0);
         self
     }
 
@@ -191,6 +201,11 @@ impl Material {
         self.post_deferred_update_request(DEFERRED_REQUEST_VARIANT_PARAMETERS);
     }
 
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.0, 1.0);
+        self.post_deferred_update_request(DEFERRED_REQUEST_VARIANT_PARAMETERS);
+    }
+
     pub fn set_albedo_texture(&mut self, handle: Option<TextureHandle>) {
         self.albedo_texture = handle;
         self.post_deferred_update_request(DEFERRED_REQUEST_VARIANT_TEXTURES);
@@ -237,7 +252,8 @@ impl Material {
             metallic: self.metallic,
             clearcoat: self.clearcoat,
             clearcoat_roughness: self.clearcoat_roughness,
-            _padding: [0.0; 2],
+            opacity: self.opacity,
+            _padding: 0.0,
         }
     }
 
@@ -371,7 +387,7 @@ impl Resource for Material {
                 #[cfg(not(feature = "headless"))]
                 engine
                     .resource_manager
-                    .get_resource_by_name::<RendererMaterial>(&self.name)?
+                    .get_resource_by_name_mut::<RendererMaterial>(&self.name)?
                     .write_parameters(engine.renderer.get_queue(), &self.renderer_parameters());
             }
             DEFERRED_REQUEST_VARIANT_TEXTURES => {

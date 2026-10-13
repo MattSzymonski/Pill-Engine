@@ -48,7 +48,8 @@ struct MaterialParams {
     float  metallic_factor;
     float  clearcoat;           // coat weight, 0 = no coat
     float  clearcoat_roughness; // perceptual
-    float2 _padding;
+    float  opacity;             // < 1: drawn blended by the translucent pass
+    float  _padding;
 };
 [[vk::binding(0, 2)]] ConstantBuffer<MaterialParams> material;
 
@@ -143,7 +144,8 @@ FragmentOutput fs_main(
     [[vk::location(4)]] float3 input_bitangent     : TEXCOORD4,
     [[vk::location(5)]] float2 velocity            : TEXCOORD5
 ) {
-    float3 albedo             = base_color_texture.Sample(base_color_sampler, texture_coordinates).rgb * material.base_color_factor;
+    float4 base_color         = base_color_texture.Sample(base_color_sampler, texture_coordinates);
+    float3 albedo             = base_color.rgb * material.base_color_factor;
     float2 metallic_roughness = metallic_roughness_texture.Sample(metallic_roughness_sampler, texture_coordinates).gb;
     // metallic_roughness.x = G channel (roughness 0=smooth, 1=rough); metallic_roughness.y = B channel (metallic 0=dielectric, 1=metal)
     float  roughness = clamp(metallic_roughness.x * material.roughness_factor, 0.045, 0.99);
@@ -184,7 +186,7 @@ FragmentOutput fs_main(
     float  fog_density = scene.fog_color_density.w;
     float  fog      = 1.0 - exp(-fog_density * fog_density * distance * distance);
     FragmentOutput output;
-    output.color    = float4(lerp(color, scene.fog_color_density.xyz, fog), 1.0);
+    output.color    = float4(lerp(color, scene.fog_color_density.xyz, fog), material.opacity * base_color.a);
     output.velocity = velocity;
     output.ambient  = float4((ambient_diffuse + specular_ibl) * (1.0 - fog), 0.0);
     return output;
