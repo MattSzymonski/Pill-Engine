@@ -1,4 +1,4 @@
-use crate::config::{TONEMAP_FRAGMENT_SHADER, TONEMAP_VERTEX_SHADER};
+use crate::config::{FULLSCREEN_VERTEX_SHADER, TONEMAP_FRAGMENT_SHADER};
 use crate::ecs::{RenderStateComponent, Tonemap};
 use crate::graphics::{
     BufferDesc, FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, PipelineDesc,
@@ -92,7 +92,7 @@ impl Pass for PassTonemap {
         let pipeline = renderer.create_pipeline(PipelineDesc {
             label: Some("pass_tonemap"),
             vs: ShaderDesc {
-                source: TONEMAP_VERTEX_SHADER,
+                source: FULLSCREEN_VERTEX_SHADER,
                 entry_func: "vs_main",
             },
             ps: ShaderDesc {

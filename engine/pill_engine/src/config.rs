@@ -113,8 +113,12 @@ pub const PBR_OPAQUE_FRAGMENT_SHADER: &str =
 pub const BACKGROUND_VERTEX_SHADER: &str = include_str!("../res/shaders/background_vertex.wgsl");
 pub const BACKGROUND_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/background_fragment.wgsl");
-pub const TONEMAP_VERTEX_SHADER: &str = include_str!("../res/shaders/tonemap_vertex.wgsl");
+pub const FULLSCREEN_VERTEX_SHADER: &str = include_str!("../res/shaders/fullscreen_vertex.wgsl");
 pub const TONEMAP_FRAGMENT_SHADER: &str = include_str!("../res/shaders/tonemap_fragment.wgsl");
+pub const MIP_DOWNSAMPLE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/mip_downsample_fragment.wgsl");
+pub const MIP_DOWNSAMPLE_NORMAL_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/mip_downsample_normal_fragment.wgsl");
 
 /// Frame composition: opaque PBR → game-defined passes (`Engine::add_render_pass`) → tonemap → UI.
 /// Creates the shared HDR and depth targets and records them in `RenderStateComponent`.
