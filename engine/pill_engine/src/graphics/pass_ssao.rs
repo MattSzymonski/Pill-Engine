@@ -4,7 +4,7 @@ use crate::config::{
 use crate::ecs::RenderStateComponent;
 use crate::graphics::fullscreen::{
     create_fullscreen_pipeline, draw_fullscreen, target_view, texture_entry, uniform_buffer,
-    uniform_entry, Binding,
+    uniform_entry, Binding, CachedBindGroup,
 };
 use crate::graphics::projection::depth_unpack;
 use crate::graphics::{
@@ -67,6 +67,7 @@ struct SsaoState {
     raw: PassTextureHandle,
     blurred_horizontal: PassTextureHandle,
     blurred: PassTextureHandle,
+    bind_groups: [CachedBindGroup; 4], // one per step, in draw order
 }
 
 /// Scalable Ambient Obscurance (McGuire, Mara, Luebke, HPG 2012) at half resolution from the depth
@@ -174,6 +175,7 @@ impl Pass for PassSsao {
             raw,
             blurred_horizontal,
             blurred,
+            bind_groups: Default::default(),
         });
         Ok(())
     }
@@ -187,7 +189,7 @@ impl Pass for PassSsao {
     ) -> Result<()> {
         let state = self
             .state
-            .as_ref()
+            .as_mut()
             .expect("PassSsao: state not initialized — call init() before draw()");
         let settings = world.get_global::<RenderStateComponent>()?.ssao;
         let (camera, _) = world.active_camera()?;
@@ -263,12 +265,15 @@ impl Pass for PassSsao {
         ];
         // Off: only the apply step, which then copies the color through
         let skipped = if settings.strength <= 0.0 { 3 } else { 0 };
-        for (label, pipeline, bindings, output) in steps.into_iter().skip(skipped) {
+        for ((label, pipeline, bindings, output), bind_group) in
+            steps.into_iter().zip(&mut state.bind_groups).skip(skipped)
+        {
             draw_fullscreen(
                 encoder,
                 renderer,
                 label,
                 pipeline,
+                bind_group,
                 &bindings,
                 target_view(renderer, output, label)?,
             )?;

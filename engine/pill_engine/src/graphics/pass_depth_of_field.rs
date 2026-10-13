@@ -6,7 +6,7 @@ use crate::config::{
 use crate::ecs::RenderStateComponent;
 use crate::graphics::fullscreen::{
     create_fullscreen_pipeline, draw_fullscreen, linear_clamp_sampler, sampler_entry, target_view,
-    texture_entry, uniform_buffer, uniform_entry, Binding,
+    texture_entry, uniform_buffer, uniform_entry, Binding, CachedBindGroup,
 };
 use crate::graphics::projection::depth_unpack;
 use crate::graphics::{
@@ -68,11 +68,12 @@ struct DepthOfFieldState {
     near_blur: Stage,
     near_composite: Stage,
     sampler: wgpu::Sampler,
-    linear_depth: PassTextureHandle, // full res
-    quarter: PassTextureHandle,      // downsampled color
-    far: PassTextureHandle,          // quarter-res far bokeh, alpha = CoC²
-    near: PassTextureHandle,         // eighth-res premultiplied near layer
-    near_blurred: PassTextureHandle, // ... blurred horizontally
+    linear_depth: PassTextureHandle,   // full res
+    quarter: PassTextureHandle,        // downsampled color
+    far: PassTextureHandle,            // quarter-res far bokeh, alpha = CoC²
+    near: PassTextureHandle,           // eighth-res premultiplied near layer
+    near_blurred: PassTextureHandle,   // ... blurred horizontally
+    bind_groups: [CachedBindGroup; 6], // one per step, in draw order
 }
 
 /// Depth of field after Sousa (SIGGRAPH 2013, CryENGINE 3): a quarter-res far-field gather on a
@@ -212,6 +213,7 @@ impl Pass for PassDepthOfField {
             far,
             near,
             near_blurred,
+            bind_groups: Default::default(),
         });
         Ok(())
     }
@@ -225,7 +227,7 @@ impl Pass for PassDepthOfField {
     ) -> Result<()> {
         let state = self
             .state
-            .as_ref()
+            .as_mut()
             .expect("PassDepthOfField: state not initialized — call init() before draw()");
         let settings = world.get_global::<RenderStateComponent>()?.depth_of_field;
         // Off: PassMotionBlur skips the composite, so the output is never read
@@ -331,12 +333,15 @@ impl Pass for PassDepthOfField {
                 self.output,
             ),
         ];
-        for (label, pipeline, bindings, output) in steps {
+        for ((label, pipeline, bindings, output), bind_group) in
+            steps.into_iter().zip(&mut state.bind_groups)
+        {
             draw_fullscreen(
                 encoder,
                 renderer,
                 label,
                 pipeline,
+                bind_group,
                 &bindings,
                 target_view(renderer, output, label)?,
             )?;

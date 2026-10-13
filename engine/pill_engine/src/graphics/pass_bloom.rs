@@ -6,6 +6,7 @@ use crate::ecs::RenderStateComponent;
 use crate::graphics::fullscreen::{
     create_fullscreen_pipeline, draw_fullscreen, draw_fullscreen_with_load, linear_clamp_sampler,
     sampler_entry, target_view, texture_entry, uniform_buffer, uniform_entry, Binding,
+    CachedBindGroup,
 };
 use crate::graphics::{
     FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, RendererTargetDesc, TargetSize,
@@ -50,6 +51,10 @@ struct BloomState {
     composite_params: wgpu::Buffer,
     // 1/2, 1/4, ... of the surface
     mips: Vec<PassTextureHandle>,
+    // One per draw: downsample into mip i, upsample into mip i, composite
+    downsample_bind_groups: Vec<CachedBindGroup>,
+    upsample_bind_groups: Vec<CachedBindGroup>,
+    composite_bind_group: CachedBindGroup,
 }
 
 /// Physically based bloom (Jimenez 2014): the input is downsampled into a mip chain, the chain is
@@ -149,6 +154,9 @@ impl Pass for PassBloom {
             plain_params,
             upsample_params: uniform_buffer::<UpsampleParams>(renderer, "pass_bloom_upsample"),
             composite_params: uniform_buffer::<CompositeParams>(renderer, "pass_bloom_composite"),
+            downsample_bind_groups: mips.iter().map(|_| CachedBindGroup::default()).collect(),
+            upsample_bind_groups: mips.iter().map(|_| CachedBindGroup::default()).collect(),
+            composite_bind_group: CachedBindGroup::default(),
             mips,
         });
         Ok(())
@@ -163,7 +171,7 @@ impl Pass for PassBloom {
     ) -> Result<()> {
         let state = self
             .state
-            .as_ref()
+            .as_mut()
             .expect("PassBloom: state not initialized — call init() before draw()");
         let render_state = world.get_global::<RenderStateComponent>()?;
         let (width, height) = renderer.get_surface_size();
@@ -205,6 +213,7 @@ impl Pass for PassBloom {
                 renderer,
                 "pass_bloom_downsample",
                 &state.downsample,
+                &mut state.downsample_bind_groups[level],
                 &[
                     Binding::Target(source),
                     Binding::Sampler(&state.sampler),
@@ -215,12 +224,19 @@ impl Pass for PassBloom {
             source = mip;
         }
         // Up: each level is added onto the next larger one, so mip 0 ends with the whole chain
-        for pair in state.mips.windows(2).rev().take_while(|_| enabled) {
+        for (level, pair) in state
+            .mips
+            .windows(2)
+            .enumerate()
+            .rev()
+            .take_while(|_| enabled)
+        {
             draw_fullscreen_with_load(
                 encoder,
                 renderer,
                 "pass_bloom_upsample",
                 &state.upsample,
+                &mut state.upsample_bind_groups[level],
                 &[
                     Binding::Target(pair[1]),
                     Binding::Sampler(&state.sampler),
@@ -238,6 +254,7 @@ impl Pass for PassBloom {
             renderer,
             "pass_bloom_composite",
             &state.composite,
+            &mut state.composite_bind_group,
             &[
                 Binding::Target(self.input),
                 Binding::Target(bloom),

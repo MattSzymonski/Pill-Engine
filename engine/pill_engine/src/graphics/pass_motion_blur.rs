@@ -2,7 +2,7 @@ use crate::config::{HDR_TARGET_FORMAT, MOTION_BLUR_FRAGMENT_SHADER};
 use crate::ecs::RenderStateComponent;
 use crate::graphics::fullscreen::{
     create_fullscreen_pipeline, draw_fullscreen, linear_clamp_sampler, sampler_entry, target_view,
-    texture_entry, uniform_buffer, uniform_entry, Binding,
+    texture_entry, uniform_buffer, uniform_entry, Binding, CachedBindGroup,
 };
 use crate::graphics::projection::depth_unpack;
 use crate::graphics::{FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, WorldQuery};
@@ -27,6 +27,7 @@ struct MotionBlurState {
     pipeline: Pipeline,
     sampler: wgpu::Sampler,
     params_buffer: wgpu::Buffer,
+    bind_group: CachedBindGroup,
 }
 
 /// Blurs `color` along the per-pixel motion vectors of the PBR pass's velocity target, scaled by
@@ -102,6 +103,7 @@ impl Pass for PassMotionBlur {
             pipeline,
             sampler: linear_clamp_sampler(renderer),
             params_buffer: uniform_buffer::<MotionBlurParams>(renderer, "pass_motion_blur_params"),
+            bind_group: CachedBindGroup::default(),
         });
         Ok(())
     }
@@ -115,7 +117,7 @@ impl Pass for PassMotionBlur {
     ) -> Result<()> {
         let state = self
             .state
-            .as_ref()
+            .as_mut()
             .expect("PassMotionBlur: state not initialized — call init() before draw()");
         let render_state = world.get_global::<RenderStateComponent>()?;
         let (camera, _) = world.active_camera()?;
@@ -140,6 +142,7 @@ impl Pass for PassMotionBlur {
             renderer,
             "pass_motion_blur",
             &state.pipeline,
+            &mut state.bind_group,
             &[
                 Binding::Target(self.color),
                 Binding::Target(self.velocity),

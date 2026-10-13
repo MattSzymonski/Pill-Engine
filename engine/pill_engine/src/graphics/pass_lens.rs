@@ -2,7 +2,7 @@ use crate::config::LENS_FRAGMENT_SHADER;
 use crate::ecs::RenderStateComponent;
 use crate::graphics::fullscreen::{
     create_fullscreen_pipeline, draw_fullscreen, linear_clamp_sampler, sampler_entry,
-    texture_entry, uniform_buffer, uniform_entry, Binding,
+    texture_entry, uniform_buffer, uniform_entry, Binding, CachedBindGroup,
 };
 use crate::graphics::{
     FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, TextureData, WorldQuery,
@@ -34,6 +34,7 @@ struct LensState {
     grain_sampler: wgpu::Sampler,
     grain_texture: PassTextureHandle,
     params_buffer: wgpu::Buffer,
+    bind_group: CachedBindGroup,
 }
 
 /// Final pass of the PostFx chain: lens distortion, chromatic aberration, grade, vignette and film
@@ -161,6 +162,7 @@ impl Pass for PassLens {
             grain_sampler,
             grain_texture,
             params_buffer: uniform_buffer::<LensParams>(renderer, "pass_lens_params"),
+            bind_group: CachedBindGroup::default(),
         });
         Ok(())
     }
@@ -189,7 +191,7 @@ impl Pass for PassLens {
 
         let state = self
             .state
-            .as_ref()
+            .as_mut()
             .expect("PassLens: state not initialized — call init() before draw()");
         let (width, height) = renderer.get_surface_size();
         let aspect_yx = height as f32 / width.max(1) as f32;
@@ -215,6 +217,7 @@ impl Pass for PassLens {
             renderer,
             "pass_lens",
             &state.pipeline,
+            &mut state.bind_group,
             &[
                 Binding::Target(self.input),
                 Binding::Sampler(&state.sampler),

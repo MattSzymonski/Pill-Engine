@@ -424,6 +424,10 @@ impl PillRenderer for Renderer {
         Ok(self.state.pass_textures.insert(texture))
     }
 
+    fn target_generation(&self) -> u64 {
+        self.state.target_generation
+    }
+
     fn generate_mipmaps(&self, texture: &wgpu::Texture, renormalize: bool) {
         self.state.mip_generator.generate(
             &self.state.device,
@@ -467,6 +471,8 @@ pub struct State {
     // Optional frame capture: (target_frame, output_path). Set via PILL_SCREENSHOT env var.
     screenshot: Option<(u32, String)>,
     frame_counter: u32,
+    // Bumped when resize rebuilds the surface-sized targets
+    target_generation: u64,
 }
 
 impl State {
@@ -637,11 +643,13 @@ impl State {
             window,
             screenshot,
             frame_counter: 0,
+            target_generation: 0,
         })
     }
 
     fn resize(&mut self, new_window_size: winit::dpi::PhysicalSize<u32>) {
         if new_window_size.width > 0 && new_window_size.height > 0 {
+            self.target_generation += 1;
             self.surface_configuration.width = new_window_size.width;
             self.surface_configuration.height = new_window_size.height;
             self.surface

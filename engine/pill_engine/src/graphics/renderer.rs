@@ -321,6 +321,10 @@ pub trait PillRenderer {
     /// Creates a depth texture sized to the current surface and returns its handle.
     fn create_depth_texture(&mut self, label: &str) -> Result<PassTextureHandle>;
 
+    /// Bumped whenever surface-sized targets are rebuilt (resize); bind groups holding target views
+    /// built under an older value are stale.
+    fn target_generation(&self) -> u64;
+
     /// Returns the texture view for a previously created render target, or `None` if not found.
     fn get_render_target_view(&self, handle: PassTextureHandle) -> Option<&wgpu::TextureView>;
 

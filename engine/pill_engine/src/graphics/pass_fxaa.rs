@@ -1,7 +1,7 @@
 use crate::config::{FXAA_FRAGMENT_SHADER, HDR_TARGET_FORMAT};
 use crate::graphics::fullscreen::{
     create_fullscreen_pipeline, draw_fullscreen, linear_clamp_sampler, sampler_entry, target_view,
-    texture_entry, uniform_buffer, uniform_entry, Binding,
+    texture_entry, uniform_buffer, uniform_entry, Binding, CachedBindGroup,
 };
 use crate::graphics::{FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, WorldQuery};
 
@@ -22,6 +22,7 @@ struct FxaaState {
     pipeline: Pipeline,
     sampler: wgpu::Sampler,
     params_buffer: wgpu::Buffer,
+    bind_group: CachedBindGroup,
 }
 
 /// FXAA 3.11 (Lottes, quality preset 39) over the tonemapped, still linear image.
@@ -68,6 +69,7 @@ impl Pass for PassFxaa {
             pipeline,
             sampler: linear_clamp_sampler(renderer),
             params_buffer: uniform_buffer::<FxaaParams>(renderer, "pass_fxaa_params"),
+            bind_group: CachedBindGroup::default(),
         });
         Ok(())
     }
@@ -81,7 +83,7 @@ impl Pass for PassFxaa {
     ) -> Result<()> {
         let state = self
             .state
-            .as_ref()
+            .as_mut()
             .expect("PassFxaa: state not initialized — call init() before draw()");
         let (width, height) = renderer.get_surface_size();
         let params = FxaaParams {
@@ -99,6 +101,7 @@ impl Pass for PassFxaa {
             renderer,
             "pass_fxaa",
             &state.pipeline,
+            &mut state.bind_group,
             &[
                 Binding::Target(self.input),
                 Binding::Sampler(&state.sampler),

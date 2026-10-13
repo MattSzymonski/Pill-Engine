@@ -55,6 +55,10 @@ impl PillRenderer for DummyRenderer {
 
     fn generate_mipmaps(&self, _texture: &wgpu::Texture, _renormalize: bool) {}
 
+    fn target_generation(&self) -> u64 {
+        0
+    }
+
     fn get_device(&self) -> &wgpu::Device {
         unimplemented!("DummyRenderer has no wgpu Device")
     }
