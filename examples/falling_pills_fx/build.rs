@@ -4,6 +4,7 @@
 use std::env;
 use std::path::PathBuf;
 
+use pill_assets::convert::{rtex_hdr_bytes, rtex_hdr_mip_bytes};
 use pill_assets::ibl::{bake_all, Equirect, DIFFUSE_SIZE, SPECULAR_SIZE};
 
 fn main() {
@@ -12,24 +13,18 @@ fn main() {
 
     let (diffuse, specular_mips) = bake_all(&synthesize_studio(256, 128));
 
-    let mut diffuse_rtex = rtex_header(2, DIFFUSE_SIZE);
-    diffuse_rtex.extend(diffuse.iter().flat_map(|value| value.to_le_bytes()));
-    std::fs::write(out_dir.join("ibl_diffuse.rtex"), diffuse_rtex).unwrap();
-
-    let mut specular_rtex = rtex_header(4, SPECULAR_SIZE);
-    specular_rtex.extend_from_slice(&(specular_mips.len() as u32).to_le_bytes());
-    for mip in &specular_mips {
-        specular_rtex.extend(mip.iter().flat_map(|value| value.to_le_bytes()));
-    }
-    std::fs::write(out_dir.join("ibl_specular.rtex"), specular_rtex).unwrap();
-}
-
-fn rtex_header(version: u32, (width, height): (u32, u32)) -> Vec<u8> {
-    let mut bytes = b"RTEX".to_vec();
-    for field in [version, width, height] {
-        bytes.extend_from_slice(&field.to_le_bytes());
-    }
-    bytes
+    let (diffuse_width, diffuse_height) = DIFFUSE_SIZE;
+    std::fs::write(
+        out_dir.join("ibl_diffuse.rtex"),
+        rtex_hdr_bytes(diffuse_width, diffuse_height, &diffuse),
+    )
+    .unwrap();
+    let (specular_width, specular_height) = SPECULAR_SIZE;
+    std::fs::write(
+        out_dir.join("ibl_specular.rtex"),
+        rtex_hdr_mip_bytes(specular_width, specular_height, &specular_mips),
+    )
+    .unwrap();
 }
 
 /// Dark studio: cool sky-to-floor gradient, a warm key and a cool top-back rim. RGBA f32.

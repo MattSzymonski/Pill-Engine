@@ -166,6 +166,36 @@ pub fn rtex_bytes(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     output
 }
 
+/// RTEX v2: Rgba32Float (f32 LE per channel), linear HDR.
+pub fn rtex_hdr_bytes(width: u32, height: u32, rgba_f32: &[f32]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(16 + rgba_f32.len() * 4);
+    output.extend_from_slice(b"RTEX");
+    output.extend_from_slice(&2u32.to_le_bytes());
+    output.extend_from_slice(&width.to_le_bytes());
+    output.extend_from_slice(&height.to_le_bytes());
+    for &value in rgba_f32 {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    output
+}
+
+/// RTEX v4: Rgba32Float mip chain (HDR specular prefilter).
+/// Header: RTEX | 4 | width | height | mip_count, then each mip's f32 texels.
+pub fn rtex_hdr_mip_bytes(width: u32, height: u32, mips: &[Vec<f32>]) -> Vec<u8> {
+    let mut output = Vec::new();
+    output.extend_from_slice(b"RTEX");
+    output.extend_from_slice(&4u32.to_le_bytes());
+    output.extend_from_slice(&width.to_le_bytes());
+    output.extend_from_slice(&height.to_le_bytes());
+    output.extend_from_slice(&(mips.len() as u32).to_le_bytes());
+    for mip in mips {
+        for &value in mip {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    output
+}
+
 /// Smooth per-vertex normals from area-weighted face normals, for primitives without NORMAL.
 fn face_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut normals = vec![[0.0f32; 3]; positions.len()];

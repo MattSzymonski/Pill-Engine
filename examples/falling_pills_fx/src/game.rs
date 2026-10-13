@@ -76,13 +76,13 @@ impl PillGame for Game {
             tex_gen::roughness(),
         ))?;
 
-        // The demo's pill: metallic, greasy roughness map, glossy clear coat on top
+        // The demo's pill: painted (dielectric), greasy roughness map, glossy clear coat on top
         let pill_material = engine.add_resource(
             Material::new("pill")
                 .albedo_texture(pill_albedo)
                 .normal_texture(pill_normal)
                 .metallic_roughness_texture(pill_roughness)
-                .metallic(1.0)
+                .metallic(0.0)
                 .roughness(1.0)
                 .clearcoat(0.3, 0.1),
         )?;

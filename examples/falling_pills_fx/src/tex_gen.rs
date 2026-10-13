@@ -18,7 +18,7 @@ pub(crate) const EXTRUDE: f32 = 0.01;
 // --- Public generators ---
 
 pub(crate) fn roughness() -> Vec<u8> {
-    gen_tex(SIZE, [255, 64, 0, 255], roughness_pixel)
+    gen_tex(SIZE, [255, 64, 255, 255], roughness_pixel)
 }
 
 pub(crate) fn albedo() -> Vec<u8> {
@@ -56,12 +56,8 @@ fn roughness_pixel(obj: [f32; 3], _axis: usize, _split: f32) -> [u8; 4] {
     let p1 = [obj[0] * 5.11, obj[1] * 5.11, obj[2] * 5.11];
     let r1 = smoothstep(fbm(p1, 5), 0.2, 0.9);
     let roughness = ((2.0 * r0).clamp(0.0, 1.0) * 1.5 * r1).clamp(0.0, 1.0);
-    [
-        (roughness * 255.0) as u8,
-        (roughness * 255.0) as u8,
-        (roughness * 255.0) as u8,
-        255,
-    ] // glTF ORM: G=roughness
+    // glTF metallic-roughness: G = roughness, B = metallic (full, so Material::metallic applies)
+    [255, (roughness * 255.0) as u8, 255, 255]
 }
 
 fn normal_pixel(obj: [f32; 3], axis: usize, split: f32) -> [u8; 4] {
