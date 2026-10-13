@@ -6,6 +6,11 @@ use pill_engine::{define_global_component, game::*};
 use crate::falling_pills::FallingPillsDirection;
 
 pub(crate) const SHOT_DURATION: f32 = 10.0;
+/// In focus in every shot (where the hero pill used to be); focus_distance below is replaced by
+/// its view depth.
+const FOCUS_POINT: Vector3f = Vector3f::new(0.0, 1.3, 0.0);
+/// Far blur relative to the demo's values (the near layer is off: near_cut > 1).
+const FAR_BLUR_SCALE: f32 = 5.0;
 
 struct Shot {
     camera_position: Vector3f,
@@ -35,7 +40,8 @@ const SHOTS: [Shot; 3] = [
         rising: false,
         depth_of_field: DepthOfField {
             focus_distance: 2.5,
-            focus_scale: 2.0,
+            // Half the demo's 2.0: the far blur of this take only
+            focus_scale: 1.0,
             near_blur: 2.0,
             near_cut: 1.5,
             anamorphic_squeeze: 0.5,
@@ -86,7 +92,12 @@ pub(crate) fn shot_system(engine: &mut Engine) -> Result<()> {
         .get_global_component_mut::<FallingPillsDirection>()?
         .rising = shot.rising;
     let render_state = engine.get_global_component_mut::<RenderStateComponent>()?;
-    render_state.depth_of_field = shot.depth_of_field;
+    let forward = (shot.look_at - shot.camera_position).normalize();
+    render_state.depth_of_field = DepthOfField {
+        focus_distance: (FOCUS_POINT - shot.camera_position).dot(forward),
+        focus_scale: shot.depth_of_field.focus_scale * FAR_BLUR_SCALE,
+        ..shot.depth_of_field
+    };
     // A cut: no motion blur between the two camera poses
     render_state.reset_motion_history();
     Ok(())
