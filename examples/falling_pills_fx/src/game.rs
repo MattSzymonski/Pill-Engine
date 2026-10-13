@@ -31,6 +31,7 @@ impl PillGame for Game {
         engine.add_global_component(FallingPillsDirection { rising: false })?;
         // Shot first, so the pills move in this frame's direction
         engine.add_system("shots", shot_system)?;
+        engine.add_system("light_fog", light_fog_system)?;
         engine.add_system("falling_pills", falling_pills_system)?;
 
         setup_render_state(engine)?;
@@ -206,5 +207,77 @@ fn setup_render_state(engine: &mut Engine) -> Result<()> {
         grade_mix: 1.0,
         ..Lens::default()
     };
+    Ok(())
+}
+
+/// Light and fog state from the demo's light.seq.ron keyframes.
+struct LightFog {
+    // Background and fog color (linear RGB)
+    background: [f32; 3],
+    fog_density: f32,
+    ibl_intensity: f32,
+    // Key, fill, rim
+    lights: [DirectionalLight; 3],
+}
+
+const fn light(direction: [f32; 3], color: [f32; 3], intensity: f32) -> DirectionalLight {
+    DirectionalLight {
+        direction,
+        color,
+        intensity,
+    }
+}
+
+#[rustfmt::skip]
+const LIGHT_FOG: [LightFog; 6] = [
+    // Setup: navy void, warm key
+    LightFog { background: [0.003, 0.004, 0.0175], fog_density: 0.26, ibl_intensity: 0.5, lights: [
+        light([0.78, -0.40, 0.45],   [1.00, 0.97, 0.92], 1.0),
+        light([-0.45, -0.30, -0.84], [0.80, 0.90, 1.00], 0.35),
+        light([0.00, -0.55, -0.83],  [0.80, 0.90, 1.00], 0.8),
+    ] },
+    // ShotB / Build strobe: red key
+    LightFog { background: [0.06, 0.0, 0.0], fog_density: 0.26, ibl_intensity: 0.0, lights: [
+        light([0.18, -0.5, 0.3],     [5.0, 0.0, 0.0],    10.0),
+        light([-0.10, -0.5, 0.40],   [0.45, 0.55, 0.80], 0.3),
+        light([0.10, -0.25, -0.3],   [0.80, 0.90, 1.00], 2.0),
+    ] },
+    // ShotB / Build strobe: blue key
+    LightFog { background: [0.0, 0.0, 0.06], fog_density: 0.26, ibl_intensity: 0.0, lights: [
+        light([0.18, -0.5, -0.3],    [0.0, 0.0, 1.0],    10.0),
+        light([0.90, -0.2, 0.40],    [0.45, 0.55, 0.80], 4.0),
+        light([0.00, -0.55, -0.83],  [0.80, 0.90, 1.00], 1.5),
+    ] },
+    // ShotA: warm key, cool fill
+    LightFog { background: [0.003, 0.004, 0.0175], fog_density: 0.26, ibl_intensity: 0.2, lights: [
+        light([0.78, -0.40, 0.45],   [1.00, 0.97, 0.92], 2.2),
+        light([-0.80, -0.42, 0.40],  [0.45, 0.55, 0.80], 2.0),
+        light([-0.45, -0.30, -0.84], [0.80, 0.90, 1.00], 1.2),
+    ] },
+    // Crew2: deep blue field, dim red key from above
+    LightFog { background: [0.03, 0.04, 0.2], fog_density: 0.174, ibl_intensity: 0.5, lights: [
+        light([0.0, -1.0, -0.3],     [3.0, 0.0, 0.0],    0.1),
+        light([0.90, -0.2, 0.40],    [0.45, 0.55, 0.80], 0.2),
+        light([-0.90, -1.0, -0.4],   [0.80, 0.90, 1.00], 0.2),
+    ] },
+    // Silence: red fill and rim
+    LightFog { background: [0.02, 0.03, 0.1], fog_density: 0.26, ibl_intensity: 0.5, lights: [
+        light([0.0, -1.0, -0.3],     [3.0, 0.0, 0.0],    1.0),
+        light([0.90, -0.2, 0.40],    [0.90, 0.12, 0.08], 2.0),
+        light([-0.90, -1.0, -0.4],   [1.00, 0.10, 0.05], 0.5),
+    ] },
+];
+
+/// Every second: a pseudo-random LIGHT_FOG setup (hash of the second).
+fn light_fog_system(engine: &mut Engine) -> Result<()> {
+    let second = engine.get_global_component::<TimeComponent>()?.time.floor();
+    let random = ((second * 12.9898).sin() * 43_758.547).fract().abs();
+    let setup = &LIGHT_FOG[(random * LIGHT_FOG.len() as f32) as usize % LIGHT_FOG.len()];
+    let render_state = engine.get_global_component_mut::<RenderStateComponent>()?;
+    render_state.background_color = setup.background;
+    render_state.fog_color = setup.background;
+    render_state.fog_density = setup.fog_density;
+    render_state.ibl_intensity = setup.ibl_intensity;
+    render_state.lights = setup.lights;
     Ok(())
 }
