@@ -24,6 +24,55 @@ pub enum PassChain {
     PostFx,
 }
 
+/// PostFx chain bloom.
+#[derive(Clone, Copy, Debug)]
+pub struct Bloom {
+    /// Bloom added to the image (0 = off).
+    pub strength: f32,
+    /// Upsample tap offset as a fraction of the screen width; larger = wider glow.
+    pub radius: f32,
+}
+
+/// PostFx chain lens and film emulation; the defaults leave the image unchanged.
+#[derive(Clone, Copy, Debug)]
+pub struct Lens {
+    /// k1 of r² distortion: negative = barrel, positive = pincushion.
+    pub distortion: f32,
+    /// Red/blue split at the frame corner in UV units, falling off as r² to 0 at the center.
+    pub chromatic_aberration: f32,
+    /// Vignette falloff scale (0 = off, ~0.6 subtle).
+    pub vignette: f32,
+    /// Film grain amplitude (0 = off, 0.03 barely visible, 0.12 medium film stock).
+    pub grain_strength: f32,
+    /// Grain texel size in pixels at 1280 px width (scales with resolution).
+    pub grain_size: f32,
+    /// Grain pattern updates per second (24 = filmic, 0 = every frame).
+    pub grain_fps: f32,
+    /// Grade: per-channel gamma, then smoothstep(edge0, edge1), blended in by `grade_mix`.
+    pub grade_gamma: [f32; 3],
+    pub grade_edge0: f32,
+    pub grade_edge1: f32,
+    /// 0 = no grade.
+    pub grade_mix: f32,
+}
+
+impl Default for Lens {
+    fn default() -> Self {
+        Self {
+            distortion: 0.0,
+            chromatic_aberration: 0.0,
+            vignette: 0.0,
+            grain_strength: 0.0,
+            grain_size: 4.0,
+            grain_fps: 24.0,
+            grade_gamma: [1.0; 3],
+            grade_edge0: 0.0,
+            grade_edge1: 1.0,
+            grade_mix: 0.0,
+        }
+    }
+}
+
 /// Directional light; `direction` points from the light toward the scene.
 #[derive(Clone, Copy, Debug)]
 pub struct DirectionalLight {
@@ -64,6 +113,8 @@ pub struct RenderStateComponent {
     /// PostFx chain: motion blur length as a fraction of the frame's motion (0.5 = 180° shutter,
     /// 0 = off).
     pub motion_blur: f32,
+    pub bloom: Bloom,
+    pub lens: Lens,
     /// Bumped by `reset_motion_history`; passes drop last frame's transforms when it changes.
     pub(crate) motion_history_epoch: u32,
 }
@@ -107,6 +158,11 @@ impl RenderStateComponent {
                 white_point: f32::INFINITY,
             },
             motion_blur: 0.5,
+            bloom: Bloom {
+                strength: 0.04,
+                radius: 0.005,
+            },
+            lens: Lens::default(),
             motion_history_epoch: 0,
         }
     }

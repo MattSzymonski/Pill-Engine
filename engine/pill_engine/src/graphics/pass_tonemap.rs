@@ -1,4 +1,4 @@
-use crate::config::{FULLSCREEN_VERTEX_SHADER, TONEMAP_FRAGMENT_SHADER};
+use crate::config::{FULLSCREEN_VERTEX_SHADER, HDR_TARGET_FORMAT, TONEMAP_FRAGMENT_SHADER};
 use crate::ecs::{RenderStateComponent, Tonemap};
 use crate::graphics::{
     BufferDesc, FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, PipelineDesc,
@@ -9,6 +9,8 @@ use pill_core::Result;
 
 pub struct PassTonemap {
     hdr_source: PassTextureHandle,
+    // None: the swapchain (sRGB view); Some: an HDR_TARGET_FORMAT target for later post passes
+    output: Option<PassTextureHandle>,
     state: Option<TonemapState>,
 }
 
@@ -45,8 +47,15 @@ impl PassTonemap {
     pub fn new(hdr_source: PassTextureHandle) -> Self {
         Self {
             hdr_source,
+            output: None,
             state: None,
         }
+    }
+
+    /// Writes the tonemapped (still linear) image to `target` instead of the swapchain.
+    pub fn with_output(mut self, target: PassTextureHandle) -> Self {
+        self.output = Some(target);
+        self
     }
 }
 
@@ -58,7 +67,10 @@ impl Pass for PassTonemap {
     fn init(&mut self, renderer: &mut dyn PillRenderer) -> Result<()> {
         // Renders to FrameTarget::srgb_view — GPU applies the OETF on write even when the surface
         // format is linear (e.g. WebGPU/wasm32).
-        let swapchain_view_format = renderer.get_surface_format().add_srgb_suffix();
+        let output_format = match self.output {
+            Some(_) => HDR_TARGET_FORMAT,
+            None => renderer.get_surface_format().add_srgb_suffix(),
+        };
 
         let bind_groups = vec![vec![
             wgpu::BindGroupLayoutEntry {
@@ -102,7 +114,7 @@ impl Pass for PassTonemap {
             vertex_buffers: &[],
             bind_groups,
             targets: &[Some(wgpu::ColorTargetState {
-                format: swapchain_view_format,
+                format: output_format,
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -190,10 +202,16 @@ impl Pass for PassTonemap {
                 })
         };
 
+        let output_view = match self.output {
+            Some(handle) => renderer
+                .get_render_target_view(handle)
+                .expect("PassTonemap: output target missing"),
+            None => &frame_target.srgb_view,
+        };
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pass_tonemap_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &frame_target.srgb_view,
+                view: output_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),

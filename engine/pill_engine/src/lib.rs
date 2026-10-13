@@ -62,10 +62,11 @@ macro_rules! define_global_component {
 pub mod game {
     pub use crate::{
         ecs::{
-            CameraAspectRatio, CameraComponent, Component, ComponentStorage, DirectionalLight,
-            EntityHandle, GamepadAxis, GamepadButton, GlobalComponent, GlobalComponentStorage,
-            InputComponent, MeshRenderingComponent, PassChain, PlayerId, RenderStateComponent,
-            SceneHandle, TimeComponent, Tonemap, TransformComponent, UpdatePhase,
+            Bloom, CameraAspectRatio, CameraComponent, Component, ComponentStorage,
+            DirectionalLight, EntityHandle, GamepadAxis, GamepadButton, GlobalComponent,
+            GlobalComponentStorage, InputComponent, Lens, MeshRenderingComponent, PassChain,
+            PlayerId, RenderStateComponent, SceneHandle, TimeComponent, Tonemap,
+            TransformComponent, UpdatePhase,
         },
         engine::{Engine, KeyboardKey, MouseButton, PillGame},
         graphics::PassTextureHandle,

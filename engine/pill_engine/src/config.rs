@@ -6,8 +6,9 @@ use crate::{
     },
     engine::Engine,
     graphics::{
-        Pass, PassMotionBlur, PassPBROpaque, PassPBRTranslucent, PassTextureHandle, PassTonemap,
-        RendererMaterialHandle, RendererTargetDesc, RendererTextureHandle, TargetSize,
+        Pass, PassBloom, PassFxaa, PassLens, PassMotionBlur, PassPBROpaque, PassPBRTranslucent,
+        PassTextureHandle, PassTonemap, RendererMaterialHandle, RendererTargetDesc,
+        RendererTextureHandle, TargetSize,
     },
     renderer::resources::RendererTexture,
     resources::{MaterialHandle, TextureHandle, TextureType},
@@ -119,6 +120,14 @@ pub const BACKGROUND_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/background_fragment.wgsl");
 pub const FULLSCREEN_VERTEX_SHADER: &str = include_str!("../res/shaders/fullscreen_vertex.wgsl");
 pub const TONEMAP_FRAGMENT_SHADER: &str = include_str!("../res/shaders/tonemap_fragment.wgsl");
+pub const BLOOM_DOWNSAMPLE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/bloom_downsample_fragment.wgsl");
+pub const BLOOM_UPSAMPLE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/bloom_upsample_fragment.wgsl");
+pub const BLOOM_COMPOSITE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/bloom_composite_fragment.wgsl");
+pub const FXAA_FRAGMENT_SHADER: &str = include_str!("../res/shaders/fxaa_fragment.wgsl");
+pub const LENS_FRAGMENT_SHADER: &str = include_str!("../res/shaders/lens_fragment.wgsl");
 pub const MOTION_BLUR_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/motion_blur_fragment.wgsl");
 pub const MIP_DOWNSAMPLE_FRAGMENT_SHADER: &str =
@@ -140,11 +149,16 @@ pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
 
 /// `PassChain::PostFx`: the default chain with post-processing between the scene passes and
 /// tonemapping; parameters live in `RenderStateComponent`:
-/// opaque PBR (+ motion vectors) → translucent PBR → game passes → motion blur → tonemap → UI.
+/// opaque PBR (+ motion vectors) → translucent PBR → game passes → motion blur → bloom →
+/// tonemap → FXAA → lens → UI.
 pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
     let (hdr_target, depth_target) = create_scene_targets(engine)?;
     let velocity_target = create_target(engine, "velocity_target", VELOCITY_TARGET_FORMAT)?;
     let motion_blur_target = create_target(engine, "motion_blur_target", HDR_TARGET_FORMAT)?;
+    let bloom_target = create_target(engine, "bloom_target", HDR_TARGET_FORMAT)?;
+    // Tonemapped, still linear; the lens pass encodes sRGB into the swapchain
+    let ldr_target = create_target(engine, "ldr_target", HDR_TARGET_FORMAT)?;
+    let fxaa_target = create_target(engine, "fxaa_target", HDR_TARGET_FORMAT)?;
 
     let opaque = opaque_pass(engine, hdr_target, depth_target)?;
     let translucent = PassPBRTranslucent::new(
@@ -168,7 +182,12 @@ pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
         depth_target,
         motion_blur_target,
     )));
-    passes.push(Box::new(PassTonemap::new(motion_blur_target)));
+    passes.push(Box::new(PassBloom::new(motion_blur_target, bloom_target)));
+    passes.push(Box::new(
+        PassTonemap::new(bloom_target).with_output(ldr_target),
+    ));
+    passes.push(Box::new(PassFxaa::new(ldr_target, fxaa_target)));
+    passes.push(Box::new(PassLens::new(fxaa_target)));
     push_ui_pass(engine, &mut passes)?;
     Ok(passes)
 }

@@ -109,7 +109,7 @@ pub(crate) enum Binding<'a> {
 }
 
 /// Builds group 0 from `bindings` (binding i = bindings[i]) and draws the full-screen triangle into
-/// `output`. Target views are looked up per frame because resizes replace them.
+/// `output`, cleared first. Target views are looked up per frame because resizes replace them.
 pub(crate) fn draw_fullscreen(
     encoder: &mut wgpu::CommandEncoder,
     renderer: &dyn PillRenderer,
@@ -117,6 +117,27 @@ pub(crate) fn draw_fullscreen(
     pipeline: &Pipeline,
     bindings: &[Binding],
     output: &wgpu::TextureView,
+) -> Result<()> {
+    draw_fullscreen_with_load(
+        encoder,
+        renderer,
+        label,
+        pipeline,
+        bindings,
+        output,
+        wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+    )
+}
+
+/// `draw_fullscreen` with an explicit load op (`Load` to blend onto existing content).
+pub(crate) fn draw_fullscreen_with_load(
+    encoder: &mut wgpu::CommandEncoder,
+    renderer: &dyn PillRenderer,
+    label: &str,
+    pipeline: &Pipeline,
+    bindings: &[Binding],
+    output: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
 ) -> Result<()> {
     let mut entries = Vec::with_capacity(bindings.len());
     for (index, binding) in bindings.iter().enumerate() {
@@ -148,7 +169,7 @@ pub(crate) fn draw_fullscreen(
             view: output,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load,
                 store: wgpu::StoreOp::Store,
             },
         })],

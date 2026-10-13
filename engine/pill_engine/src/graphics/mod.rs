@@ -3,8 +3,11 @@
 #[cfg(feature = "headless")]
 mod dummy_renderer;
 mod fullscreen;
+mod pass_bloom;
 #[cfg(feature = "ui")]
 mod pass_egui;
+mod pass_fxaa;
+mod pass_lens;
 mod pass_motion_blur;
 mod pass_pbr_opaque;
 mod pass_tonemap;
@@ -23,8 +26,11 @@ pub use renderer::{
 
 #[cfg(feature = "headless")]
 pub use self::dummy_renderer::DummyRenderer;
+pub use pass_bloom::PassBloom;
 #[cfg(feature = "ui")]
 pub use pass_egui::PassEgui;
+pub use pass_fxaa::PassFxaa;
+pub use pass_lens::PassLens;
 pub use pass_motion_blur::PassMotionBlur;
 pub use pass_pbr_opaque::{PassPBROpaque, PassPBRTranslucent};
 pub use pass_tonemap::PassTonemap;
