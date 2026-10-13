@@ -219,8 +219,8 @@ jobs:
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 
-          # Wait up to 180s for the server to bind (release wasm-pack + wasm-opt is slow).
-          for _ in $(seq 1 180); do
+          # Wait up to 600s for the server to bind: a cold cache compiles the asset-pack build deps (libwebp, brotli, gltf) before wasm-pack + wasm-opt.
+          for _ in $(seq 1 600); do
             if curl -sf -o /dev/null http://127.0.0.1:8080/; then
               break
             fi
