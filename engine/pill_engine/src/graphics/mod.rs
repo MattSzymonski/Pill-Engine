@@ -11,6 +11,7 @@ mod pass_fxaa;
 mod pass_lens;
 mod pass_motion_blur;
 mod pass_pbr_opaque;
+mod pass_ssao;
 mod pass_tonemap;
 mod projection;
 mod render_queue;
@@ -35,6 +36,7 @@ pub use pass_fxaa::PassFxaa;
 pub use pass_lens::PassLens;
 pub use pass_motion_blur::PassMotionBlur;
 pub use pass_pbr_opaque::{PassPBROpaque, PassPBRTranslucent};
+pub use pass_ssao::PassSsao;
 pub use pass_tonemap::PassTonemap;
 pub(crate) use scene_uniform::SceneUniform;
 

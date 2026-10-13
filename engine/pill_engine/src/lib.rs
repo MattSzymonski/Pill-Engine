@@ -65,7 +65,7 @@ pub mod game {
             Bloom, CameraAspectRatio, CameraComponent, Component, ComponentStorage, DepthOfField,
             DirectionalLight, EntityHandle, GamepadAxis, GamepadButton, GlobalComponent,
             GlobalComponentStorage, InputComponent, Lens, MeshRenderingComponent, PassChain,
-            PlayerId, RenderStateComponent, SceneHandle, TimeComponent, Tonemap,
+            PlayerId, RenderStateComponent, SceneHandle, Ssao, TimeComponent, Tonemap,
             TransformComponent, UpdatePhase,
         },
         engine::{Engine, KeyboardKey, MouseButton, PillGame},

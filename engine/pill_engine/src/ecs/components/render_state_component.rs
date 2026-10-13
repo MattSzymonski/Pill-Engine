@@ -76,6 +76,18 @@ pub struct DepthOfField {
     pub anamorphic_squeeze: f32,
 }
 
+/// PostFx chain screen-space ambient occlusion; darkens only the indirect (IBL) light.
+#[derive(Clone, Copy, Debug)]
+pub struct Ssao {
+    /// Blend of the occlusion (0 = off, 1 = full).
+    pub strength: f32,
+    /// World-space sampling radius.
+    pub radius: f32,
+    pub intensity: f32,
+    /// Contrast exponent applied to the visibility.
+    pub power: f32,
+}
+
 /// PostFx chain lens and film emulation; the defaults leave the image unchanged.
 #[derive(Clone, Copy, Debug)]
 pub struct Lens {
@@ -156,6 +168,7 @@ pub struct RenderStateComponent {
     /// PostFx chain: motion blur length as a fraction of the frame's motion (0.5 = 180° shutter,
     /// 0 = off).
     pub motion_blur: f32,
+    pub ssao: Ssao,
     pub depth_of_field: DepthOfField,
     pub bloom: Bloom,
     pub lens: Lens,
@@ -202,6 +215,12 @@ impl RenderStateComponent {
                 white_point: f32::INFINITY,
             },
             motion_blur: 0.5,
+            ssao: Ssao {
+                strength: 1.0,
+                radius: 0.5,
+                intensity: 1.0,
+                power: 1.5,
+            },
             depth_of_field: DepthOfField {
                 focus_distance: 6.0,
                 focus_scale: 0.0,

@@ -7,7 +7,7 @@ use crate::{
     engine::Engine,
     graphics::{
         Pass, PassBloom, PassDepthOfField, PassFxaa, PassLens, PassMotionBlur, PassPBROpaque,
-        PassPBRTranslucent, PassTextureHandle, PassTonemap, RendererMaterialHandle,
+        PassPBRTranslucent, PassSsao, PassTextureHandle, PassTonemap, RendererMaterialHandle,
         RendererTargetDesc, RendererTextureHandle, TargetSize,
     },
     renderer::resources::RendererTexture,
@@ -137,6 +137,10 @@ pub const DOF_NEAR_BLUR_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/dof_near_blur_fragment.wgsl");
 pub const DOF_NEAR_COMPOSITE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/dof_near_composite_fragment.wgsl");
+pub const SSAO_FRAGMENT_SHADER: &str = include_str!("../res/shaders/ssao_fragment.wgsl");
+pub const SSAO_BLUR_FRAGMENT_SHADER: &str = include_str!("../res/shaders/ssao_blur_fragment.wgsl");
+pub const SSAO_APPLY_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/ssao_apply_fragment.wgsl");
 pub const FXAA_FRAGMENT_SHADER: &str = include_str!("../res/shaders/fxaa_fragment.wgsl");
 pub const LENS_FRAGMENT_SHADER: &str = include_str!("../res/shaders/lens_fragment.wgsl");
 pub const MOTION_BLUR_FRAGMENT_SHADER: &str =
@@ -160,10 +164,14 @@ pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
 
 /// `PassChain::PostFx`: the default chain with post-processing between the scene passes and
 /// tonemapping; parameters live in `RenderStateComponent`:
-/// opaque PBR (+ motion vectors) → translucent PBR → game passes → depth of field → motion blur
-/// (+ DoF composite) → bloom → tonemap → FXAA → lens → UI.
+/// opaque PBR (+ motion vectors, ambient) → SSAO → translucent PBR → game passes → depth of
+/// field → motion blur (+ DoF composite) → bloom → tonemap → FXAA → lens → UI.
 pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
+    // The opaque pass renders into `opaque_target`; SSAO writes the shared HDR target that the
+    // translucent and game passes then draw onto
     let (hdr_target, depth_target) = create_scene_targets(engine)?;
+    let opaque_target = create_target(engine, "opaque_target", HDR_TARGET_FORMAT)?;
+    let ambient_target = create_target(engine, "ambient_target", AMBIENT_TARGET_FORMAT)?;
     let velocity_target = create_target(engine, "velocity_target", VELOCITY_TARGET_FORMAT)?;
     let depth_of_field_target = engine.renderer.create_render_target(RendererTargetDesc {
         name: "depth_of_field_target".to_string(),
@@ -176,7 +184,7 @@ pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
     let ldr_target = create_target(engine, "ldr_target", HDR_TARGET_FORMAT)?;
     let fxaa_target = create_target(engine, "fxaa_target", HDR_TARGET_FORMAT)?;
 
-    let opaque = opaque_pass(engine, hdr_target, depth_target)?;
+    let opaque = opaque_pass(engine, opaque_target, depth_target)?;
     let translucent = PassPBRTranslucent::new(
         hdr_target,
         depth_target,
@@ -187,8 +195,15 @@ pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
         Box::new(
             opaque
                 .without_translucent()
-                .with_velocity_target(velocity_target),
+                .with_velocity_target(velocity_target)
+                .with_ambient_target(ambient_target),
         ),
+        Box::new(PassSsao::new(
+            opaque_target,
+            ambient_target,
+            depth_target,
+            hdr_target,
+        )),
         Box::new(translucent),
     ];
     passes.append(&mut engine.custom_render_passes);
