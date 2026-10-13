@@ -65,6 +65,10 @@ impl PillGame for Game {
             rs.background = Some(bg_h);
             rs.ibl_diffuse = diff_h;
             rs.ibl_specular = spec_h;
+            // Post chain for bloom on the emissive parts; its other effects stay off
+            rs.pass_chain = PassChain::PostFx;
+            rs.motion_blur = 0.0;
+            rs.ssao.strength = 0.0;
         }
 
         let scene = engine.create_scene("helmet")?;
@@ -109,7 +113,7 @@ impl PillGame for Game {
                 .metallic_roughness_texture(metallic_roughness_handle)
                 .metallic(1.0)
                 .roughness(1.0)
-                .emissive(Color::new(1.0, 1.0, 1.0))
+                .emissive(Color::new(100.0, 100.0, 100.0))
                 .emissive_texture(emissive_handle),
         )?;
 

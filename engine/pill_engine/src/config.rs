@@ -6,8 +6,7 @@ use crate::{
     },
     engine::Engine,
     graphics::{
-        Pass, PassBloom, PassDepthOfField, PassFxaa, PassLens, PassMotionBlur, PassPBROpaque,
-        PassPBRTranslucent, PassSsao, PassTextureHandle, PassTonemap, RendererMaterialHandle,
+        Pass, PassPBROpaque, PassTextureHandle, PassTonemap, RendererMaterialHandle,
         RendererTargetDesc, RendererTextureHandle, TargetSize,
     },
     renderer::resources::RendererTexture,
@@ -16,6 +15,11 @@ use crate::{
 
 #[cfg(feature = "ui")]
 use crate::ecs::egui_system;
+
+#[cfg(feature = "post_fx")]
+use crate::graphics::{
+    PassBloom, PassDepthOfField, PassFxaa, PassLens, PassMotionBlur, PassPBRTranslucent, PassSsao,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ecs::{audio_system, haptics_system, AudioManagerComponent};
@@ -112,43 +116,67 @@ pub const VELOCITY_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg1
 pub const AMBIENT_TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 // WGSL is generated from res/shaders/*.hlsl by pill_assets (build.rs)
+// The post_fx variants also write motion vectors and the ambient term
+#[cfg(not(feature = "post_fx"))]
 pub const PBR_OPAQUE_VERTEX_SHADER: &str = include_str!("../res/shaders/pbr_opaque_vertex.wgsl");
+#[cfg(feature = "post_fx")]
+pub const PBR_OPAQUE_VERTEX_SHADER: &str =
+    include_str!("../res/shaders/pbr_opaque_post_fx_vertex.wgsl");
+#[cfg(not(feature = "post_fx"))]
 pub const PBR_OPAQUE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/pbr_opaque_fragment.wgsl");
+#[cfg(feature = "post_fx")]
+pub const PBR_OPAQUE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/pbr_opaque_post_fx_fragment.wgsl");
 pub const BACKGROUND_VERTEX_SHADER: &str = include_str!("../res/shaders/background_vertex.wgsl");
+#[cfg(not(feature = "post_fx"))]
 pub const BACKGROUND_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/background_fragment.wgsl");
+#[cfg(feature = "post_fx")]
+pub const BACKGROUND_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/background_post_fx_fragment.wgsl");
 pub const FULLSCREEN_VERTEX_SHADER: &str = include_str!("../res/shaders/fullscreen_vertex.wgsl");
 pub const TONEMAP_FRAGMENT_SHADER: &str = include_str!("../res/shaders/tonemap_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const BLOOM_DOWNSAMPLE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/bloom_downsample_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const BLOOM_UPSAMPLE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/bloom_upsample_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const BLOOM_COMPOSITE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/bloom_composite_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const LINEARIZE_DEPTH_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/linearize_depth_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const DOF_DOWNSAMPLE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/dof_downsample_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const DOF_BOKEH_FRAGMENT_SHADER: &str = include_str!("../res/shaders/dof_bokeh_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const DOF_NEAR_PREFILTER_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/dof_near_prefilter_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const DOF_NEAR_BLUR_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/dof_near_blur_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const DOF_NEAR_COMPOSITE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/dof_near_composite_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const SSAO_FRAGMENT_SHADER: &str = include_str!("../res/shaders/ssao_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const SSAO_BLUR_FRAGMENT_SHADER: &str = include_str!("../res/shaders/ssao_blur_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const SSAO_APPLY_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/ssao_apply_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const FXAA_FRAGMENT_SHADER: &str = include_str!("../res/shaders/fxaa_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const LENS_FRAGMENT_SHADER: &str = include_str!("../res/shaders/lens_fragment.wgsl");
+#[cfg(feature = "post_fx")]
 pub const MOTION_BLUR_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/motion_blur_fragment.wgsl");
-pub const MIP_DOWNSAMPLE_FRAGMENT_SHADER: &str =
-    include_str!("../res/shaders/mip_downsample_fragment.wgsl");
-pub const MIP_DOWNSAMPLE_NORMAL_FRAGMENT_SHADER: &str =
-    include_str!("../res/shaders/mip_downsample_normal_fragment.wgsl");
 
 /// Frame composition: opaque PBR → game-defined passes (`Engine::add_render_pass`) → tonemap → UI.
 /// Creates the shared HDR and depth targets and records them in `RenderStateComponent`.
@@ -162,6 +190,7 @@ pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
     Ok(passes)
 }
 
+#[cfg(feature = "post_fx")]
 /// `PassChain::PostFx`: the default chain with post-processing between the scene passes and
 /// tonemapping; parameters live in `RenderStateComponent`:
 /// opaque PBR (+ motion vectors, ambient) → SSAO → translucent PBR → game passes → depth of
@@ -182,6 +211,8 @@ pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
     let bloom_target = create_target(engine, "bloom_target", HDR_TARGET_FORMAT)?;
     // Tonemapped, still linear; the lens pass encodes sRGB into the swapchain
     let ldr_target = create_target(engine, "ldr_target", HDR_TARGET_FORMAT)?;
+    // FXAA at the render size, before the upscale: its blend reaches less than a pixel, so it
+    // smooths 1-texel stair steps but not the 2-pixel steps of an upscaled image
     let fxaa_target = create_target(engine, "fxaa_target", HDR_TARGET_FORMAT)?;
 
     let opaque = opaque_pass(engine, opaque_target, depth_target)?;

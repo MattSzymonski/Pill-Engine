@@ -6,7 +6,7 @@ use crate::{
         BufferDesc, FrameTarget, Pass, PassPBROpaque, PassTextureHandle, PillRenderer, Pipeline,
         PipelineDesc, RendererTargetDesc, TargetSize, TextureData, WorldQuery,
     },
-    renderer::resources::{MipGenerator, RendererMesh, RendererTexture, Vertex},
+    renderer::resources::{RendererMesh, RendererTexture, Vertex},
     resources::ResourceManager,
 };
 
@@ -212,6 +212,10 @@ impl PillRenderer for Renderer {
         Ok(())
     }
 
+    fn get_render_size(&self) -> (u32, u32) {
+        self.state.render_size
+    }
+
     fn get_surface_size(&self) -> (u32, u32) {
         (
             self.state.surface_configuration.width,
@@ -338,11 +342,7 @@ impl PillRenderer for Renderer {
         };
         let (width, height) = match (desc.size, divisor) {
             (TargetSize::Fixed(width, height), _) => (width, height),
-            (_, divisor) => divided_size(
-                self.state.surface_configuration.width,
-                self.state.surface_configuration.height,
-                divisor.unwrap_or(1),
-            ),
+            (_, divisor) => divided_size(self.state.render_size, divisor.unwrap_or(1)),
         };
         let texture = RendererTexture::new_render_target(
             &self.state.device,
@@ -366,11 +366,8 @@ impl PillRenderer for Renderer {
     }
 
     fn create_depth_texture(&mut self, label: &str) -> Result<PassTextureHandle> {
-        let texture = RendererTexture::new_depth_texture(
-            &self.state.device,
-            &self.state.surface_configuration,
-            label,
-        )?;
+        let (width, height) = self.state.render_size;
+        let texture = RendererTexture::new_depth_texture(&self.state.device, width, height, label)?;
         let handle = self.state.pass_textures.insert(texture);
         self.state.surface_targets.push((
             handle,
@@ -428,15 +425,6 @@ impl PillRenderer for Renderer {
         self.state.target_generation
     }
 
-    fn generate_mipmaps(&self, texture: &wgpu::Texture, renormalize: bool) {
-        self.state.mip_generator.generate(
-            &self.state.device,
-            &self.state.queue,
-            texture,
-            renormalize,
-        );
-    }
-
     fn get_texture_view(&self, handle: PassTextureHandle) -> Option<wgpu::TextureView> {
         self.state.pass_textures.get(handle).map(|t| {
             t.texture
@@ -459,7 +447,6 @@ enum SurfaceTarget {
 
 pub struct State {
     pass_textures: PillSlotMap<PassTextureHandle, RendererTexture>,
-    mip_generator: MipGenerator,
     surface_targets: Vec<(PassTextureHandle, SurfaceTarget)>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -473,6 +460,9 @@ pub struct State {
     frame_counter: u32,
     // Bumped when resize rebuilds the surface-sized targets
     target_generation: u64,
+    // Size of TargetSize::Surface targets: the surface in logical pixels (physical ÷ scale factor),
+    // so HiDPI displays don't render 4× the pixels; the swapchain pass upscales
+    render_size: (u32, u32),
 }
 
 impl State {
@@ -627,12 +617,14 @@ impl State {
         };
 
         let pass_textures = PillSlotMap::with_capacity_and_key(10);
-
-        let mip_generator = MipGenerator::new(&device);
+        let render_size = logical_size(
+            surface_configuration.width,
+            surface_configuration.height,
+            window.scale_factor(),
+        );
 
         Ok(Self {
             pass_textures,
-            mip_generator,
             surface_targets: Vec::new(),
             surface,
             device,
@@ -644,6 +636,7 @@ impl State {
             screenshot,
             frame_counter: 0,
             target_generation: 0,
+            render_size,
         })
     }
 
@@ -654,6 +647,11 @@ impl State {
             self.surface_configuration.height = new_window_size.height;
             self.surface
                 .configure(&self.device, &self.surface_configuration);
+            self.render_size = logical_size(
+                new_window_size.width,
+                new_window_size.height,
+                self.window.scale_factor(),
+            );
 
             // Passes look target views up every frame, so replacing the textures in place is enough
             for (handle, target) in &self.surface_targets {
@@ -663,8 +661,7 @@ impl State {
                         format,
                         divisor,
                     } => {
-                        let (width, height) =
-                            divided_size(new_window_size.width, new_window_size.height, *divisor);
+                        let (width, height) = divided_size(self.render_size, *divisor);
                         RendererTexture::new_render_target(
                             &self.device,
                             name,
@@ -675,7 +672,8 @@ impl State {
                     }
                     SurfaceTarget::Depth { name } => RendererTexture::new_depth_texture(
                         &self.device,
-                        &self.surface_configuration,
+                        self.render_size.0,
+                        self.render_size.1,
                         name,
                     ),
                 };
@@ -691,9 +689,15 @@ impl State {
     }
 }
 
-/// Surface size divided by `divisor`, at least 1×1.
-fn divided_size(width: u32, height: u32, divisor: u32) -> (u32, u32) {
+/// `(width, height)` divided by `divisor`, at least 1×1.
+fn divided_size((width, height): (u32, u32), divisor: u32) -> (u32, u32) {
     ((width / divisor).max(1), (height / divisor).max(1))
+}
+
+/// Physical size ÷ scale factor, at least 1×1.
+fn logical_size(width: u32, height: u32, scale_factor: f64) -> (u32, u32) {
+    let scale = |pixels: u32| ((pixels as f64 / scale_factor.max(1.0)).round() as u32).max(1);
+    (scale(width), scale(height))
 }
 
 /// Converts little-endian f32 texels to little-endian f16 (Rgba32Float → Rgba16Float data).

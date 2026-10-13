@@ -47,7 +47,9 @@ pub enum PassChain {
     /// Opaque PBR → game passes → tonemap.
     #[default]
     Default,
-    /// Default chain plus the post-processing passes (see `config::post_fx_pass_chain`).
+    /// Default chain plus the post-processing passes (see `config::post_fx_pass_chain`); needs
+    /// pill_engine's `post_fx` feature.
+    #[cfg(feature = "post_fx")]
     PostFx,
 }
 

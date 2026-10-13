@@ -1,5 +1,5 @@
 use crate::{
-    config::{default_pass_chain, post_fx_pass_chain, RENDERING_SYSTEM},
+    config::{default_pass_chain, RENDERING_SYSTEM},
     ecs::{CameraAspectRatio, CameraComponent, EntityHandle, PassChain, RenderStateComponent},
     engine::Engine,
 };
@@ -25,7 +25,8 @@ pub fn rendering_system(engine: &mut Engine) -> Result<()> {
             .boot_done = true;
         let passes = match pass_chain {
             PassChain::Default => default_pass_chain(engine)?,
-            PassChain::PostFx => post_fx_pass_chain(engine)?,
+            #[cfg(feature = "post_fx")]
+            PassChain::PostFx => crate::config::post_fx_pass_chain(engine)?,
         };
         engine.renderer.set_passes(passes)?;
         return Ok(());

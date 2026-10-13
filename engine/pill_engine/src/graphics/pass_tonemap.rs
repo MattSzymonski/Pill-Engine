@@ -105,6 +105,7 @@ impl PassTonemap {
     }
 
     /// Writes the tonemapped (still linear) image to `target` instead of the swapchain.
+    #[cfg_attr(not(feature = "post_fx"), allow(dead_code))]
     pub fn with_output(mut self, target: PassTextureHandle) -> Self {
         self.output = Some(target);
         self

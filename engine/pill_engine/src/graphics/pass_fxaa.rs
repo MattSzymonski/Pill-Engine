@@ -43,9 +43,11 @@ impl PassFxaa {
         Self {
             input,
             output,
-            subpixel: 0.75,
-            edge_threshold: 0.166,
-            edge_threshold_min: 0.0833,
+            // Strongest settings of the FXAA 3.11 ranges: on HiDPI the render is upscaled 2×, so
+            // every edge FXAA leaves aliased shows as 2-pixel steps
+            subpixel: 1.0,
+            edge_threshold: 0.063,
+            edge_threshold_min: 0.0312,
             state: None,
         }
     }
@@ -85,7 +87,7 @@ impl Pass for PassFxaa {
             .state
             .as_mut()
             .expect("PassFxaa: state not initialized — call init() before draw()");
-        let (width, height) = renderer.get_surface_size();
+        let (width, height) = renderer.get_render_size();
         let params = FxaaParams {
             reciprocal_frame: [1.0 / width.max(1) as f32, 1.0 / height.max(1) as f32],
             subpixel: self.subpixel,

@@ -73,4 +73,7 @@ gltf_loading = ["dep:goth-gltf", "dep:zune-jpeg", "dep:zune-png", "dep:pill_asse
 ibl_bake = ["dep:pill_assets"]
 # Embedded PPAK asset pack (`Engine::mount_asset_pack`); path-based resources load from it first.
 asset_pack = ["dep:pill_assets"]
+# PassChain::PostFx and its passes (motion blur, SSAO, depth of field, bloom, FXAA, lens); off by
+# default so games on the default chain don't ship their code and shaders.
+post_fx = []
 all = ["game", "internal", "networking"]

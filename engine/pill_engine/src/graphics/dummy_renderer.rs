@@ -49,11 +49,13 @@ impl PillRenderer for DummyRenderer {
         Ok(())
     }
 
-    fn get_surface_size(&self) -> (u32, u32) {
+    fn get_render_size(&self) -> (u32, u32) {
         (0, 0)
     }
 
-    fn generate_mipmaps(&self, _texture: &wgpu::Texture, _renormalize: bool) {}
+    fn get_surface_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
 
     fn target_generation(&self) -> u64 {
         0

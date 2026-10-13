@@ -13,4 +13,4 @@ ureq = "2"
 pill_assets = { path = "../../engine/pill_assets", features = ["encode"] }
 
 [dependencies]
-pill_engine = { path = "../../engine/pill_engine", features = ["game", "internal", "asset_pack"] }
+pill_engine = { path = "../../engine/pill_engine", features = ["game", "internal", "asset_pack", "post_fx"] }

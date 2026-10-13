@@ -222,9 +222,9 @@ pub struct RendererTargetDesc {
 
 #[derive(Clone, Copy, Debug)]
 pub enum TargetSize {
-    /// Matches the surface and is rebuilt (same handle) when the window is resized.
+    /// The render size (surface ÷ display scale factor), rebuilt (same handle) on resize.
     Surface,
-    /// Surface size divided by n (min 1 px), rebuilt with the surface; for half/quarter-res passes.
+    /// Render size divided by n (min 1 px), rebuilt with it; for half/quarter-res passes.
     SurfaceDivisor(u32),
     /// Fixed width and height.
     Fixed(u32, u32),
@@ -297,6 +297,10 @@ pub trait PillRenderer {
     /// Initializes `pass` and inserts it into the running chain before the tonemap pass.
     fn insert_pass(&mut self, pass: Box<dyn Pass>) -> Result<()>;
 
+    /// Size of `TargetSize::Surface` targets: the surface in logical pixels (physical ÷ scale
+    /// factor). Passes writing the swapchain upscale from it.
+    fn get_render_size(&self) -> (u32, u32);
+
     /// Returns the current surface dimensions `(width, height)` in pixels.
     fn get_surface_size(&self) -> (u32, u32);
 
@@ -334,9 +338,6 @@ pub trait PillRenderer {
         name: &str,
         data: TextureData,
     ) -> Result<PassTextureHandle>;
-
-    /// Fills mips 1.. of `texture` (RENDER_ATTACHMENT usage) from mip 0; `renormalize` for normal maps.
-    fn generate_mipmaps(&self, texture: &wgpu::Texture, renormalize: bool);
 
     /// Creates a new `TextureView` for a previously registered texture handle.
     /// Returns `None` if the handle is not found.

@@ -4,10 +4,7 @@ use crate::config::{
     PBR_OPAQUE_FRAGMENT_SHADER, PBR_OPAQUE_VERTEX_SHADER, VELOCITY_TARGET_FORMAT,
 };
 use crate::{
-    ecs::{
-        CameraComponent, EntityHandle, MeshRenderingComponent, RenderStateComponent,
-        TransformComponent,
-    },
+    ecs::{CameraComponent, MeshRenderingComponent, RenderStateComponent, TransformComponent},
     graphics::{
         camera_forward, camera_view_projection, decompose_render_queue_key, BufferDesc,
         FrameTarget, Pass, PassTextureHandle, PillRenderer, Pipeline, PipelineDesc, RenderQueueKey,
@@ -19,8 +16,11 @@ use crate::{
         RendererMesh, Vertex,
     },
 };
-use pill_core::{error, LogContext, Matrix4f, PillSlotMapKey, Result, Vector3f};
+use pill_core::{error, LogContext, Matrix4f, Result, Vector3f};
+// Motion history (post_fx): entity handles and their index/version
 use std::num::NonZeroU32;
+#[cfg(feature = "post_fx")]
+use {crate::ecs::EntityHandle, pill_core::PillSlotMapKey};
 
 /// Camera uniform layout: position (vec4) + view-projection matrices (mat4x4) of this and the
 /// previous frame + flags (x = 1 when the pass writes motion vectors).
@@ -92,6 +92,7 @@ impl DrawTransform {
 }
 
 /// Last frame's transform of an entity slot, the entity version that drew it and the frame.
+#[cfg_attr(not(feature = "post_fx"), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct PreviousTransform {
     transform: DrawTransform,
@@ -282,6 +283,7 @@ pub struct PassPBROpaque {
     // blended over the color target, depth-tested against the opaque depth without writing it
     translucent: bool,
     // Opaque mode with a PassPBRTranslucent after it: leave opacity < 1 materials to that pass
+    #[cfg_attr(not(feature = "post_fx"), allow(dead_code))]
     exclude_translucent: bool,
     color_target: PassTextureHandle,
     depth_target: PassTextureHandle,
@@ -347,6 +349,7 @@ impl PassPBROpaque {
 
     /// Last frame's transform of `entity`, recording `current` for the next frame. An entity not
     /// drawn last frame, or a different entity in a reused slot (version changed), has no motion.
+    #[cfg(feature = "post_fx")]
     fn previous_transform(
         &mut self,
         entity: EntityHandle,
@@ -371,26 +374,31 @@ impl PassPBROpaque {
         previous
     }
 
+    #[cfg(feature = "post_fx")]
     pub fn max_instances(&self) -> usize {
         self.max_instances
     }
 
+    #[cfg(feature = "post_fx")]
     pub fn initial_ibl(&self) -> [PassTextureHandle; 3] {
         self.initial_ibl
     }
 
+    #[cfg(feature = "post_fx")]
     /// Skips materials with opacity < 1, for chains where a `PassPBRTranslucent` draws them.
     pub fn without_translucent(mut self) -> Self {
         self.exclude_translucent = true;
         self
     }
 
+    #[cfg(feature = "post_fx")]
     /// Also writes motion vectors (VELOCITY_TARGET_FORMAT): UV offset from last frame's position.
     pub fn with_velocity_target(mut self, target: PassTextureHandle) -> Self {
         self.velocity_target = Some(target);
         self
     }
 
+    #[cfg(feature = "post_fx")]
     /// Also writes the fogged IBL term alone (AMBIENT_TARGET_FORMAT), which SSAO darkens.
     pub fn with_ambient_target(mut self, target: PassTextureHandle) -> Self {
         self.ambient_target = Some(target);
@@ -427,6 +435,7 @@ fn get_state(pass: &mut PassPBROpaque) -> &mut PassPBROpaqueState {
         .expect("PassPBROpaque: state not initialized — call init() before draw()")
 }
 
+#[cfg(feature = "post_fx")]
 /// Whether the material of a render key has opacity < 1; a missing material counts as opaque.
 fn is_translucent(world: &WorldQuery<'_>, key: RenderQueueKey) -> bool {
     let key_fields = decompose_render_queue_key(key);
@@ -440,12 +449,14 @@ fn is_translucent(world: &WorldQuery<'_>, key: RenderQueueKey) -> bool {
         .is_ok_and(|material| material.translucent)
 }
 
+#[cfg(feature = "post_fx")]
 /// Translucent PBR: materials with opacity < 1, sorted back to front and alpha-blended over the
 /// HDR target after the opaque pass, depth-tested against the opaque depth. Also writes depth and,
 /// with `with_velocity_target`, motion vectors, so depth of field and motion blur treat the glass
 /// surface as the nearest one. Shares PassPBROpaque's shaders.
 pub struct PassPBRTranslucent(PassPBROpaque);
 
+#[cfg(feature = "post_fx")]
 impl PassPBRTranslucent {
     /// Same targets and IBL defaults as the opaque pass it follows.
     pub fn new(
@@ -465,6 +476,7 @@ impl PassPBRTranslucent {
     }
 }
 
+#[cfg(feature = "post_fx")]
 impl Pass for PassPBRTranslucent {
     fn get_label(&self) -> &str {
         self.0.get_label()
@@ -991,12 +1003,23 @@ impl Pass for PassPBROpaque {
         // them by material, then mesh (depth-tested, so order doesn't matter). Translucent: back to
         // front; equal neighbouring keys still share an instanced draw, which keeps that order.
         self.draws.clear();
-        for (entity, transform, mesh_rendering) in
-            world.query_two::<TransformComponent, MeshRenderingComponent>()?
-        {
+        // Motion history needs entity versions; without it plain storage iteration is enough
+        #[cfg(feature = "post_fx")]
+        let entities = world.query_two::<TransformComponent, MeshRenderingComponent>()?;
+        #[cfg(not(feature = "post_fx"))]
+        let entities = world
+            .query::<TransformComponent>()?
+            .data
+            .iter()
+            .zip(world.query::<MeshRenderingComponent>()?.data.iter())
+            .filter_map(|(transform, mesh_rendering)| {
+                Some(((), transform.as_ref()?, mesh_rendering.as_ref()?))
+            });
+        for (entity, transform, mesh_rendering) in entities {
             let Some(key) = mesh_rendering.render_queue_key else {
                 continue;
             };
+            #[cfg(feature = "post_fx")]
             if (self.translucent || self.exclude_translucent)
                 && is_translucent(world, key) != self.translucent
             {
@@ -1013,11 +1036,14 @@ impl Pass for PassPBROpaque {
                 break;
             }
             let current = DrawTransform::from(transform);
+            #[cfg(feature = "post_fx")]
             let previous = if motion_vectors {
                 self.previous_transform(entity, current)
             } else {
                 current
             };
+            #[cfg(not(feature = "post_fx"))]
+            let (previous, _) = (current, entity);
             let distance_squared =
                 (transform.position - active_camera_transform.position).length_squared();
             self.draws.push(Draw {
