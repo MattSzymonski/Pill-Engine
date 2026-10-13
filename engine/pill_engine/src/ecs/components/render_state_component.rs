@@ -103,7 +103,8 @@ pub struct Lens {
     pub grain_size: f32,
     /// Grain pattern updates per second (24 = filmic, 0 = every frame).
     pub grain_fps: f32,
-    /// Grade: per-channel gamma, then smoothstep(edge0, edge1), blended in by `grade_mix`.
+    /// Grade: per-channel gamma, then smoothstep(edge0, edge1) (edge0 > edge1 inverts), blended in
+    /// by `grade_mix`.
     pub grade_gamma: [f32; 3],
     pub grade_edge0: f32,
     pub grade_edge1: f32,

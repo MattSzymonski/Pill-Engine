@@ -177,7 +177,8 @@ impl Pass for PassLens {
         // Advance the grain pattern at grain_fps, keeping the remainder so the rate stays exact
         if lens.grain_fps > 0.0 {
             let interval = 1.0 / lens.grain_fps;
-            self.grain_time += world.delta_time;
+            // delta_time is in milliseconds
+            self.grain_time += world.delta_time / 1000.0;
             if self.grain_time >= interval {
                 self.grain_time %= interval;
                 self.grain_frame = self.grain_frame.wrapping_add(1);

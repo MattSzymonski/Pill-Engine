@@ -14,6 +14,15 @@ struct LensParams {
     float4 grade_params;     // x = edge0, y = edge1, z = mix (0 = off)
 };
 
+// smoothstep(edge0, edge1, x) that is also defined for edge0 > edge1 (a descending ramp) and for
+// equal edges: the builtin is undefined there on Metal/GLSL and divides by zero
+float3 ramp(float edge0, float edge1, float3 x) {
+    float  span = edge1 - edge0;
+    float  denominator = abs(span) < 1e-4 ? (span < 0.0 ? -1e-4 : 1e-4) : span;
+    float3 t = saturate((x - edge0) / denominator);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 [[vk::binding(0, 0)]] Texture2D                  source_texture;
 [[vk::binding(1, 0)]] SamplerState               linear_sampler;
 [[vk::binding(2, 0)]] ConstantBuffer<LensParams> params;
@@ -37,8 +46,8 @@ float4 fs_main(float2 texture_coordinates : TEXCOORD0, float4 position : SV_Posi
         source_texture.SampleLevel(linear_sampler, distorted + ca_offset, 0).b);
 
     // Per-channel gamma, then a smoothstep ramp (edge0 > edge1 inverts); max() keeps pow off NaN
-    float3 graded = smoothstep(params.grade_params.x, params.grade_params.y,
-                               pow(max(color, 0.0), params.grade_gamma.rgb));
+    float3 graded = ramp(params.grade_params.x, params.grade_params.y,
+                         pow(max(color, 0.0), params.grade_gamma.rgb));
     color = lerp(color, graded, params.grade_params.z);
 
     // After the grade, so a descending ramp doesn't turn dark corners bright
