@@ -2,7 +2,7 @@
 //! speed from a random XZ position, tumbling, and wraps from the floor back to the top. The pose
 //! is a closed-form function of time, not simulation state.
 
-use pill_engine::{define_component, game::*};
+use pill_engine::{define_component, define_global_component, game::*};
 
 pub(crate) const FALLING_PILLS_COUNT: usize = 688;
 /// XZ spawn half-extent around (0, FALLING_PILLS_Z_CENTER).
@@ -28,6 +28,9 @@ define_component!(FallingPill {
     rotation: Vector3f,
     spin: Vector3f,
 });
+
+// Rising instead of falling (set per shot)
+define_global_component!(FallingPillsDirection { rising: bool });
 
 /// Deterministic hash → [0, 1) (GLSL sin-hash); a fixed per-index scatter needs no RNG.
 fn hash01(seed: f32) -> f32 {
@@ -56,12 +59,12 @@ fn make_pill(index: usize) -> FallingPill {
     }
 }
 
-/// Spawns `FALLING_PILLS_COUNT` pills; `material(index)` picks each pill's material.
+/// Spawns `FALLING_PILLS_COUNT` pills sharing `mesh` and `material`.
 pub(crate) fn spawn_falling_pills(
     engine: &mut Engine,
     scene: SceneHandle,
     mesh: &MeshHandle,
-    material: impl Fn(usize) -> MaterialHandle,
+    material: &MaterialHandle,
 ) {
     for index in 0..FALLING_PILLS_COUNT {
         let pill = make_pill(index);
@@ -77,7 +80,7 @@ pub(crate) fn spawn_falling_pills(
             .with_component(
                 MeshRenderingComponent::builder()
                     .mesh(mesh)
-                    .material(&material(index))
+                    .material(material)
                     .build(),
             )
             .with_component(pill)
@@ -87,17 +90,21 @@ pub(crate) fn spawn_falling_pills(
 
 pub(crate) fn falling_pills_system(engine: &mut Engine) -> Result<()> {
     let time = engine.get_global_component::<TimeComponent>()?.time;
+    let rising = engine
+        .get_global_component::<FallingPillsDirection>()?
+        .rising;
     let span = FALLING_PILLS_HEIGHT - FALLING_PILLS_FLOOR;
     for (_, transform, pill) in
         engine.iterate_two_components_mut::<TransformComponent, FallingPill>()?
     {
         let cycle = span / pill.speed;
         let fall_time = (time + pill.phase * cycle).rem_euclid(cycle);
-        transform.set_position(Vector3f::new(
-            pill.x,
-            FALLING_PILLS_HEIGHT - pill.speed * fall_time,
-            pill.z,
-        ));
+        let y = if rising {
+            FALLING_PILLS_FLOOR + pill.speed * fall_time
+        } else {
+            FALLING_PILLS_HEIGHT - pill.speed * fall_time
+        };
+        transform.set_position(Vector3f::new(pill.x, y, pill.z));
         transform.set_rotation(pill.rotation + pill.spin * time);
     }
     Ok(())

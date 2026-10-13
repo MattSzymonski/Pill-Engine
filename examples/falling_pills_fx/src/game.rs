@@ -1,27 +1,18 @@
-//! Falling pills (from the demo's "Build" shot) rendered through `PassChain::PostFx`: a rain of
-//! clear-coated pills around a slowly turning hero pill, with fog, an emissive orb and the
-//! post-processing passes configured in `RenderStateComponent`.
+//! Falling pills (the demo's "Build" and "Crew2" shots) rendered through `PassChain::PostFx`: a rain
+//! of clear-coated pills with fog, an emissive orb and the post-processing passes configured in
+//! `RenderStateComponent`. The camera cuts between the takes (see shots.rs).
 
-use pill_engine::{define_component, game::*};
+use pill_engine::game::*;
 
-use crate::falling_pills::{falling_pills_system, spawn_falling_pills, FallingPill};
+use crate::falling_pills::{
+    falling_pills_system, spawn_falling_pills, FallingPill, FallingPillsDirection,
+};
 use crate::mesh::{make_pill_mesh_bytes, make_sphere_mesh_bytes};
+use crate::shots::{shot_system, ShotCycle};
 use crate::tex_gen;
 
 // Deep navy, also the fog color, so distant pills dissolve into the background
 const BACKGROUND_COLOR: [f32; 3] = [0.003, 0.004, 0.0175];
-const CAMERA_POSITION: Vector3f = Vector3f::new(0.0, 1.8, -3.25);
-const HERO_POSITION: Vector3f = Vector3f::new(0.0, 1.3, 0.0);
-
-define_component!(HeroPill {
-    spin: f32, // degrees/s around Y
-});
-
-// Slow sideways sway around the hero pill, so camera motion feeds motion blur
-define_component!(SwayCamera {
-    amplitude: f32, // units along X
-    frequency: f32, // radians/s
-});
 
 pub struct Game {}
 
@@ -36,11 +27,11 @@ impl PillGame for Game {
         engine.register_component::<MeshRenderingComponent>(scene)?;
         engine.register_component::<CameraComponent>(scene)?;
         engine.register_component::<FallingPill>(scene)?;
-        engine.register_component::<HeroPill>(scene)?;
-        engine.register_component::<SwayCamera>(scene)?;
+        engine.add_global_component(ShotCycle { current: None })?;
+        engine.add_global_component(FallingPillsDirection { rising: false })?;
+        // Shot first, so the pills move in this frame's direction
+        engine.add_system("shots", shot_system)?;
         engine.add_system("falling_pills", falling_pills_system)?;
-        engine.add_system("hero_pill", hero_pill_system)?;
-        engine.add_system("sway_camera", sway_camera_system)?;
 
         setup_render_state(engine)?;
 
@@ -86,14 +77,6 @@ impl PillGame for Game {
                 .roughness(1.0)
                 .clearcoat(0.3, 0.1),
         )?;
-        // Every 8th falling pill is a frosted glass shell, drawn by the translucent pass
-        let glass_material = engine.add_resource(
-            Material::new("glass_pill")
-                .albedo(Color::new(0.75, 0.85, 1.0))
-                .roughness(0.15)
-                .clearcoat(1.0, 0.05)
-                .opacity(0.35),
-        )?;
         let orb_material = engine.add_resource(
             Material::new("orb")
                 .albedo(Color::new(0.0, 0.0, 0.0))
@@ -106,31 +89,7 @@ impl PillGame for Game {
         )?;
 
         // --- Entities ---
-        engine
-            .build_entity(scene)
-            .with_component(
-                TransformComponent::builder()
-                    .position(HERO_POSITION)
-                    .rotation(Vector3f::new(0.0, 0.0, 70.0))
-                    .scale(Vector3f::splat(0.3))
-                    .build(),
-            )
-            .with_component(
-                MeshRenderingComponent::builder()
-                    .mesh(&pill_mesh)
-                    .material(&pill_material)
-                    .build(),
-            )
-            .with_component(HeroPill { spin: 25.0 })
-            .build();
-
-        spawn_falling_pills(engine, scene, &pill_mesh, |index| {
-            if index % 8 == 0 {
-                glass_material
-            } else {
-                pill_material
-            }
-        });
+        spawn_falling_pills(engine, scene, &pill_mesh, &pill_material);
 
         // Emissive orb: the bloom source
         engine
@@ -166,13 +125,10 @@ impl PillGame for Game {
             )
             .build();
 
-        let mut camera_transform = TransformComponent::builder()
-            .position(CAMERA_POSITION)
-            .build();
-        camera_transform.look_at(HERO_POSITION);
+        // Pose and fov are set by shot_system
         engine
             .build_entity(scene)
-            .with_component(camera_transform)
+            .with_component(TransformComponent::default())
             .with_component(
                 CameraComponent::builder()
                     .enabled(true)
@@ -180,10 +136,6 @@ impl PillGame for Game {
                     .range(0.05..60.0)
                     .build(),
             )
-            .with_component(SwayCamera {
-                amplitude: 0.8,
-                frequency: 0.5,
-            })
             .build();
 
         Ok(())
@@ -239,14 +191,6 @@ fn setup_render_state(engine: &mut Engine) -> Result<()> {
         intensity: 1.5,
         power: 1.5,
     };
-    // Focus on the hero pill; pills between it and the camera fall into the near layer
-    render_state.depth_of_field = DepthOfField {
-        focus_distance: 3.3,
-        focus_scale: 2.0,
-        near_blur: 2.0,
-        near_cut: 0.5,
-        anamorphic_squeeze: 0.5,
-    };
     render_state.bloom = Bloom {
         strength: 0.04,
         radius: 0.005,
@@ -262,29 +206,5 @@ fn setup_render_state(engine: &mut Engine) -> Result<()> {
         grade_mix: 1.0,
         ..Lens::default()
     };
-    Ok(())
-}
-
-fn hero_pill_system(engine: &mut Engine) -> Result<()> {
-    let delta_time = engine.get_global_component::<TimeComponent>()?.delta_time;
-    for (_, transform, hero) in
-        engine.iterate_two_components_mut::<TransformComponent, HeroPill>()?
-    {
-        let mut rotation = transform.rotation;
-        rotation.y += hero.spin * delta_time;
-        transform.set_rotation(rotation);
-    }
-    Ok(())
-}
-
-fn sway_camera_system(engine: &mut Engine) -> Result<()> {
-    let time = engine.get_global_component::<TimeComponent>()?.time;
-    for (_, transform, sway) in
-        engine.iterate_two_components_mut::<TransformComponent, SwayCamera>()?
-    {
-        let offset = sway.amplitude * (sway.frequency * time).sin();
-        transform.set_position(CAMERA_POSITION + Vector3f::new(offset, 0.0, 0.0));
-        transform.look_at(HERO_POSITION);
-    }
     Ok(())
 }
