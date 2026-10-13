@@ -60,6 +60,22 @@ pub struct Bloom {
     pub radius: f32,
 }
 
+/// PostFx chain depth of field. Circle of confusion = (1/focus_distance − 1/distance) · focus_scale,
+/// clamped to ±1; negative is in front of the focal plane (near layer).
+#[derive(Clone, Copy, Debug)]
+pub struct DepthOfField {
+    /// View-space distance in focus.
+    pub focus_distance: f32,
+    /// Blur gain (0 = off).
+    pub focus_scale: f32,
+    /// Near-layer blur width multiplier (0 = no near blur).
+    pub near_blur: f32,
+    /// Near CoC at which the near layer becomes fully opaque (lower = more foreground blurred).
+    pub near_cut: f32,
+    /// Horizontal bokeh squeeze: 1 = round, 0.5 = 2:1 anamorphic oval.
+    pub anamorphic_squeeze: f32,
+}
+
 /// PostFx chain lens and film emulation; the defaults leave the image unchanged.
 #[derive(Clone, Copy, Debug)]
 pub struct Lens {
@@ -140,6 +156,7 @@ pub struct RenderStateComponent {
     /// PostFx chain: motion blur length as a fraction of the frame's motion (0.5 = 180° shutter,
     /// 0 = off).
     pub motion_blur: f32,
+    pub depth_of_field: DepthOfField,
     pub bloom: Bloom,
     pub lens: Lens,
     /// Bumped by `reset_motion_history`; passes drop last frame's transforms when it changes.
@@ -185,6 +202,13 @@ impl RenderStateComponent {
                 white_point: f32::INFINITY,
             },
             motion_blur: 0.5,
+            depth_of_field: DepthOfField {
+                focus_distance: 6.0,
+                focus_scale: 0.0,
+                near_blur: 1.0,
+                near_cut: 0.9,
+                anamorphic_squeeze: 1.0,
+            },
             bloom: Bloom {
                 strength: 0.04,
                 radius: 0.005,

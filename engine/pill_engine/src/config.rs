@@ -6,9 +6,9 @@ use crate::{
     },
     engine::Engine,
     graphics::{
-        Pass, PassBloom, PassFxaa, PassLens, PassMotionBlur, PassPBROpaque, PassPBRTranslucent,
-        PassTextureHandle, PassTonemap, RendererMaterialHandle, RendererTargetDesc,
-        RendererTextureHandle, TargetSize,
+        Pass, PassBloom, PassDepthOfField, PassFxaa, PassLens, PassMotionBlur, PassPBROpaque,
+        PassPBRTranslucent, PassTextureHandle, PassTonemap, RendererMaterialHandle,
+        RendererTargetDesc, RendererTextureHandle, TargetSize,
     },
     renderer::resources::RendererTexture,
     resources::{MaterialHandle, TextureHandle, TextureType},
@@ -126,6 +126,17 @@ pub const BLOOM_UPSAMPLE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/bloom_upsample_fragment.wgsl");
 pub const BLOOM_COMPOSITE_FRAGMENT_SHADER: &str =
     include_str!("../res/shaders/bloom_composite_fragment.wgsl");
+pub const LINEARIZE_DEPTH_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/linearize_depth_fragment.wgsl");
+pub const DOF_DOWNSAMPLE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/dof_downsample_fragment.wgsl");
+pub const DOF_BOKEH_FRAGMENT_SHADER: &str = include_str!("../res/shaders/dof_bokeh_fragment.wgsl");
+pub const DOF_NEAR_PREFILTER_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/dof_near_prefilter_fragment.wgsl");
+pub const DOF_NEAR_BLUR_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/dof_near_blur_fragment.wgsl");
+pub const DOF_NEAR_COMPOSITE_FRAGMENT_SHADER: &str =
+    include_str!("../res/shaders/dof_near_composite_fragment.wgsl");
 pub const FXAA_FRAGMENT_SHADER: &str = include_str!("../res/shaders/fxaa_fragment.wgsl");
 pub const LENS_FRAGMENT_SHADER: &str = include_str!("../res/shaders/lens_fragment.wgsl");
 pub const MOTION_BLUR_FRAGMENT_SHADER: &str =
@@ -149,11 +160,16 @@ pub fn default_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
 
 /// `PassChain::PostFx`: the default chain with post-processing between the scene passes and
 /// tonemapping; parameters live in `RenderStateComponent`:
-/// opaque PBR (+ motion vectors) → translucent PBR → game passes → motion blur → bloom →
-/// tonemap → FXAA → lens → UI.
+/// opaque PBR (+ motion vectors) → translucent PBR → game passes → depth of field → motion blur
+/// (+ DoF composite) → bloom → tonemap → FXAA → lens → UI.
 pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
     let (hdr_target, depth_target) = create_scene_targets(engine)?;
     let velocity_target = create_target(engine, "velocity_target", VELOCITY_TARGET_FORMAT)?;
+    let depth_of_field_target = engine.renderer.create_render_target(RendererTargetDesc {
+        name: "depth_of_field_target".to_string(),
+        format: HDR_TARGET_FORMAT,
+        size: TargetSize::SurfaceDivisor(4),
+    })?;
     let motion_blur_target = create_target(engine, "motion_blur_target", HDR_TARGET_FORMAT)?;
     let bloom_target = create_target(engine, "bloom_target", HDR_TARGET_FORMAT)?;
     // Tonemapped, still linear; the lens pass encodes sRGB into the swapchain
@@ -176,12 +192,20 @@ pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
         Box::new(translucent),
     ];
     passes.append(&mut engine.custom_render_passes);
-    passes.push(Box::new(PassMotionBlur::new(
+    passes.push(Box::new(PassDepthOfField::new(
         hdr_target,
-        velocity_target,
         depth_target,
-        motion_blur_target,
+        depth_of_field_target,
     )));
+    passes.push(Box::new(
+        PassMotionBlur::new(
+            hdr_target,
+            velocity_target,
+            depth_target,
+            motion_blur_target,
+        )
+        .with_depth_of_field(depth_of_field_target),
+    ));
     passes.push(Box::new(PassBloom::new(motion_blur_target, bloom_target)));
     passes.push(Box::new(
         PassTonemap::new(bloom_target).with_output(ldr_target),

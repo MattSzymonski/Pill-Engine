@@ -1,5 +1,7 @@
 // Per-pixel gather along the pixel's own motion vector (McGuire et al. 2012 without the
 // tile-max neighbourhood). Samples across a depth discontinuity are down-weighted.
+// With depth of field, every sample is first composited with the quarter-res DoF result
+// (lerp by its alpha = CoC², [Sousa13 §Final Composite]), so the upsample costs no extra pass.
 
 struct MotionBlurParams {
     float velocity_scale; // shutter fraction of the frame interval, 0 = off
@@ -8,7 +10,8 @@ struct MotionBlurParams {
     uint  max_samples;
     float depth_mul;      // view distance = depth_mul / (depth_add - depth)
     float depth_add;
-    float2 _padding;
+    uint  has_depth_of_field;
+    float _padding;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> color_texture;
@@ -16,8 +19,18 @@ struct MotionBlurParams {
 [[vk::binding(2, 0)]] Texture2D<float>  depth_texture;
 [[vk::binding(3, 0)]] ConstantBuffer<MotionBlurParams> params;
 [[vk::binding(4, 0)]] SamplerState linear_sampler;
+[[vk::binding(5, 0)]] Texture2D<float4> depth_of_field_texture; // rgb = blurred, a = blend; unused without DoF
 
 static const int MAX_SAMPLES = 64;
+
+float3 composite(float2 texture_coordinates) {
+    float3 color = color_texture.SampleLevel(linear_sampler, texture_coordinates, 0).rgb;
+    if (params.has_depth_of_field == 0) {
+        return color;
+    }
+    float4 blurred = depth_of_field_texture.SampleLevel(linear_sampler, texture_coordinates, 0);
+    return lerp(color, blurred.rgb, blurred.a);
+}
 
 float view_distance(float2 texture_coordinates, uint2 size) {
     int2  texel = clamp(int2(texture_coordinates * float2(size)), int2(0, 0), int2(size) - 1);
@@ -33,7 +46,7 @@ float4 fs_main(float2 texture_coordinates : TEXCOORD0) : SV_Target {
 
     float2 velocity     = velocity_texture.SampleLevel(linear_sampler, texture_coordinates, 0).xy * params.velocity_scale;
     float  speed_pixels = length(velocity * float2(size));
-    float3 center       = color_texture.SampleLevel(linear_sampler, texture_coordinates, 0).rgb;
+    float3 center       = composite(texture_coordinates);
     if (speed_pixels < params.min_speed) {
         return float4(center, 1.0);
     }
@@ -49,7 +62,7 @@ float4 fs_main(float2 texture_coordinates : TEXCOORD0) : SV_Target {
         float2 sample_location = texture_coordinates + velocity * offset;
         float  sample_distance = view_distance(sample_location, size);
         float  weight          = 1.0 / (1.0 + abs(sample_distance - center_distance) * params.depth_softness);
-        accumulated += color_texture.SampleLevel(linear_sampler, sample_location, 0).rgb * weight;
+        accumulated += composite(sample_location) * weight;
         weight_sum  += weight;
     }
     return float4(accumulated / weight_sum, 1.0);

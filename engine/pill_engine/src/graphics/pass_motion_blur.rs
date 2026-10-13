@@ -19,7 +19,8 @@ struct MotionBlurParams {
     max_samples: u32,
     depth_mul: f32,
     depth_add: f32,
-    _padding: [f32; 2],
+    has_depth_of_field: u32,
+    _padding: f32,
 }
 
 struct MotionBlurState {
@@ -35,6 +36,7 @@ pub struct PassMotionBlur {
     velocity: PassTextureHandle,
     depth: PassTextureHandle,
     output: PassTextureHandle,
+    depth_of_field: Option<PassTextureHandle>,
     /// Pixels; slower pixels are copied unblurred.
     pub min_speed: f32,
     /// Sample weight falloff per unit of view-space depth difference to the center pixel.
@@ -55,11 +57,20 @@ impl PassMotionBlur {
             velocity,
             depth,
             output,
+            depth_of_field: None,
             min_speed: 0.5,
             depth_softness: 2.0,
             max_samples: 16,
             state: None,
         }
+    }
+}
+
+impl PassMotionBlur {
+    /// Composites `PassDepthOfField`'s output (rgb, alpha = blend) into the image while blurring.
+    pub fn with_depth_of_field(mut self, depth_of_field: PassTextureHandle) -> Self {
+        self.depth_of_field = Some(depth_of_field);
+        self
     }
 }
 
@@ -79,6 +90,7 @@ impl Pass for PassMotionBlur {
                 texture_entry(2, false),
                 uniform_entry(3),
                 sampler_entry(4),
+                texture_entry(5, true),
             ],
             HDR_TARGET_FORMAT,
             None,
@@ -112,7 +124,8 @@ impl Pass for PassMotionBlur {
             max_samples: self.max_samples,
             depth_mul,
             depth_add,
-            _padding: [0.0; 2],
+            has_depth_of_field: self.depth_of_field.is_some() as u32,
+            _padding: 0.0,
         };
         renderer
             .get_queue()
@@ -128,6 +141,8 @@ impl Pass for PassMotionBlur {
                 Binding::Target(self.depth),
                 Binding::Buffer(&state.params_buffer),
                 Binding::Sampler(&state.sampler),
+                // Without DoF any filterable texture fills the slot; the shader ignores it
+                Binding::Target(self.depth_of_field.unwrap_or(self.color)),
             ],
             target_view(renderer, self.output, "pass_motion_blur")?,
         )

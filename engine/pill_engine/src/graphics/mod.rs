@@ -4,6 +4,7 @@
 mod dummy_renderer;
 mod fullscreen;
 mod pass_bloom;
+mod pass_depth_of_field;
 #[cfg(feature = "ui")]
 mod pass_egui;
 mod pass_fxaa;
@@ -27,6 +28,7 @@ pub use renderer::{
 #[cfg(feature = "headless")]
 pub use self::dummy_renderer::DummyRenderer;
 pub use pass_bloom::PassBloom;
+pub use pass_depth_of_field::PassDepthOfField;
 #[cfg(feature = "ui")]
 pub use pass_egui::PassEgui;
 pub use pass_fxaa::PassFxaa;
