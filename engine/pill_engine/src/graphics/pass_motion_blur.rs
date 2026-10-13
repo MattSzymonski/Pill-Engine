@@ -20,7 +20,7 @@ struct MotionBlurParams {
     depth_mul: f32,
     depth_add: f32,
     has_depth_of_field: u32,
-    _padding: f32,
+    max_radius: f32,
 }
 
 struct MotionBlurState {
@@ -42,6 +42,8 @@ pub struct PassMotionBlur {
     /// Sample weight falloff per unit of view-space depth difference to the center pixel.
     pub depth_softness: f32,
     pub max_samples: u32,
+    /// Pixels; longer motion vectors are shortened to this.
+    pub max_radius: f32,
     state: Option<MotionBlurState>,
 }
 
@@ -61,6 +63,7 @@ impl PassMotionBlur {
             min_speed: 0.5,
             depth_softness: 2.0,
             max_samples: 16,
+            max_radius: 32.0,
             state: None,
         }
     }
@@ -125,7 +128,7 @@ impl Pass for PassMotionBlur {
             depth_mul,
             depth_add,
             has_depth_of_field: self.depth_of_field.is_some() as u32,
-            _padding: 0.0,
+            max_radius: self.max_radius,
         };
         renderer
             .get_queue()

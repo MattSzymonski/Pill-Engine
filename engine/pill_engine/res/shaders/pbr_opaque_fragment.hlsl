@@ -5,6 +5,7 @@ struct Camera {
     float4                position;
     column_major float4x4 view_projection;
     column_major float4x4 previous_view_projection;
+    float4                flags; // x = 1 when the pass writes motion vectors
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Camera> camera;
 
@@ -142,7 +143,8 @@ FragmentOutput fs_main(
     [[vk::location(2)]] float3 input_normal        : TEXCOORD2,
     [[vk::location(3)]] float3 input_tangent       : TEXCOORD3,
     [[vk::location(4)]] float3 input_bitangent     : TEXCOORD4,
-    [[vk::location(5)]] float2 velocity            : TEXCOORD5
+    [[vk::location(5)]] float4 clip_position          : TEXCOORD5,
+    [[vk::location(6)]] float4 previous_clip_position : TEXCOORD6
 ) {
     float4 base_color         = base_color_texture.Sample(base_color_sampler, texture_coordinates);
     float3 albedo             = base_color.rgb * material.base_color_factor;
@@ -187,7 +189,11 @@ FragmentOutput fs_main(
     float  fog      = 1.0 - exp(-fog_density * fog_density * distance * distance);
     FragmentOutput output;
     output.color    = float4(lerp(color, scene.fog_color_density.xyz, fog), material.opacity * base_color.a);
-    output.velocity = velocity;
+    // Motion vector in UV units (NDC y points up, UV v points down); w clamped for points that were
+    // at or behind the camera last frame
+    float2 ndc          = clip_position.xy / max(clip_position.w, 1e-4);
+    float2 previous_ndc = previous_clip_position.xy / max(previous_clip_position.w, 1e-4);
+    output.velocity = (ndc - previous_ndc) * float2(0.5, -0.5);
     output.ambient  = float4((ambient_diffuse + specular_ibl) * (1.0 - fog), 0.0);
     return output;
 }

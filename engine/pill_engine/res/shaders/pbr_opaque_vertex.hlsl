@@ -5,6 +5,7 @@ struct Camera {
     float4                position;
     column_major float4x4 view_projection;
     column_major float4x4 previous_view_projection;
+    float4                flags; // x = 1 when the pass writes motion vectors
 };
 [[vk::binding(0, 0)]] ConstantBuffer<Camera> camera;
 
@@ -13,12 +14,9 @@ struct DrawTransform {
     float4 rotation; // xyz, radians
     float4 scale;    // xyz
 };
-// This and last frame's transform (motion vectors); mirrors PerDrawStd140 in pass_pbr_opaque.rs
-struct PerDraw {
-    DrawTransform current;
-    DrawTransform previous;
-};
-[[vk::binding(0, 3)]] StructuredBuffer<PerDraw> per_draw_array;
+// Mirrors DrawTransform in pass_pbr_opaque.rs: this frame's and last frame's (motion vectors only)
+[[vk::binding(0, 3)]] StructuredBuffer<DrawTransform> per_draw_array;
+[[vk::binding(1, 3)]] StructuredBuffer<DrawTransform> previous_per_draw_array;
 
 struct VertexOutput {
     [[vk::location(0)]] float2 texture_coordinates : TEXCOORD0;
@@ -26,7 +24,10 @@ struct VertexOutput {
     [[vk::location(2)]] float3 world_normal        : TEXCOORD2;
     [[vk::location(3)]] float3 world_tangent       : TEXCOORD3;
     [[vk::location(4)]] float3 world_bitangent     : TEXCOORD4;
-    [[vk::location(5)]] float2 velocity            : TEXCOORD5;
+    // Clip positions of this and last frame; the fragment shader divides per pixel (dividing per
+    // vertex and interpolating is wrong across a triangle, and for vertices behind the camera)
+    [[vk::location(5)]] float4 clip_position          : TEXCOORD5;
+    [[vk::location(6)]] float4 previous_clip_position : TEXCOORD6;
                         float4 sv_position         : SV_POSITION;
 };
 
@@ -56,21 +57,21 @@ float3x3 rotation_matrix(DrawTransform transform) {
 
 [shader("vertex")]
 VertexOutput vs_main(VertexInput input, uint instance_id : SV_InstanceID) {
-    PerDraw per_draw = per_draw_array[instance_id];
-    DrawTransform transform = per_draw.current;
+    DrawTransform transform = per_draw_array[instance_id];
 
     float3x3 rotation = rotation_matrix(transform);
     float3 world_position = transform.position.xyz + mul(rotation, input.position * transform.scale.xyz);
     float4 clip_position  = mul(camera.view_projection, float4(world_position, 1.0));
 
-    DrawTransform previous = per_draw.previous;
-    float3 previous_world_position = previous.position.xyz + mul(rotation_matrix(previous), input.position * previous.scale.xyz);
-    float4 previous_clip_position  = mul(camera.previous_view_projection, float4(previous_world_position, 1.0));
-
     VertexOutput output;
-    output.sv_position         = clip_position;
-    // Motion vector in UV units (NDC y points up, UV v points down); interpolated per pixel
-    output.velocity            = (clip_position.xy / clip_position.w - previous_clip_position.xy / previous_clip_position.w) * float2(0.5, -0.5);
+    output.sv_position            = clip_position;
+    output.clip_position          = clip_position;
+    output.previous_clip_position = clip_position;
+    if (camera.flags.x > 0.5) {
+        DrawTransform previous = previous_per_draw_array[instance_id];
+        float3 previous_world_position = previous.position.xyz + mul(rotation_matrix(previous), input.position * previous.scale.xyz);
+        output.previous_clip_position  = mul(camera.previous_view_projection, float4(previous_world_position, 1.0));
+    }
     output.texture_coordinates = input.texture_coordinates;
     output.world_position      = world_position;
     // Inverse-transpose of R*S is R*S^-1: divide by scale so non-uniform scale keeps normals perpendicular

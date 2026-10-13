@@ -11,7 +11,7 @@ struct MotionBlurParams {
     float depth_mul;      // view distance = depth_mul / (depth_add - depth)
     float depth_add;
     uint  has_depth_of_field;
-    float _padding;
+    float max_radius;     // pixels; longer motion vectors are shortened to this
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> color_texture;
@@ -46,6 +46,12 @@ float4 fs_main(float2 texture_coordinates : TEXCOORD0) : SV_Target {
 
     float2 velocity     = velocity_texture.SampleLevel(linear_sampler, texture_coordinates, 0).xy * params.velocity_scale;
     float  speed_pixels = length(velocity * float2(size));
+    // Cuts, resizes and teleports can produce screen-sized vectors; spreading the few samples over
+    // the whole frame would ghost it, so the blur length is capped (McGuire et al. 2012)
+    if (speed_pixels > params.max_radius) {
+        velocity     *= params.max_radius / speed_pixels;
+        speed_pixels  = params.max_radius;
+    }
     float3 center       = composite(texture_coordinates);
     if (speed_pixels < params.min_speed) {
         return float4(center, 1.0);

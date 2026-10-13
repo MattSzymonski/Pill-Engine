@@ -5,7 +5,7 @@ use crate::config::{
 };
 use crate::{
     ecs::{
-        CameraComponent, ComponentStorage, MeshRenderingComponent, RenderStateComponent,
+        CameraComponent, EntityHandle, MeshRenderingComponent, RenderStateComponent,
         TransformComponent,
     },
     graphics::{
@@ -23,13 +23,14 @@ use pill_core::{error, LogContext, Matrix4f, PillSlotMapKey, Result, Vector3f};
 use std::num::NonZeroU32;
 
 /// Camera uniform layout: position (vec4) + view-projection matrices (mat4x4) of this and the
-/// previous frame (motion vectors).
+/// previous frame + flags (x = 1 when the pass writes motion vectors).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     position: [f32; 4],
     view_projection_matrix: [[f32; 4]; 4],
     previous_view_projection_matrix: [[f32; 4]; 4],
+    flags: [f32; 4],
 }
 
 impl CameraUniform {
@@ -38,6 +39,7 @@ impl CameraUniform {
             position: [0.0; 4],
             view_projection_matrix: Matrix4f::IDENTITY.to_cols_array_2d(),
             previous_view_projection_matrix: Matrix4f::IDENTITY.to_cols_array_2d(),
+            flags: [0.0; 4],
         }
     }
 
@@ -89,29 +91,31 @@ impl DrawTransform {
     }
 }
 
-/// Per-draw storage entry (96 B): this and last frame's transform. GPU builds model = T·R·S, MVP
-/// and the motion vector.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct PerDrawStd140 {
-    current: DrawTransform,
-    previous: DrawTransform,
-}
-
-/// Last frame's transform of an entity slot and the frame it was drawn in.
+/// Last frame's transform of an entity slot, the entity version that drew it and the frame.
 #[derive(Clone, Copy)]
 struct PreviousTransform {
     transform: DrawTransform,
+    version: NonZeroU32,
     frame: u64,
 }
 
-// Per-draw data lives in one storage buffer indexed by instance id (no per-draw dynamic offsets).
-const PER_DRAW_STRIDE_BYTES: usize = std::mem::size_of::<PerDrawStd140>();
+// Per-draw transforms live in storage buffers indexed by instance id (no per-draw dynamic offsets):
+// binding 0 this frame's, binding 1 last frame's (motion vectors only).
+const PER_DRAW_STRIDE_BYTES: usize = std::mem::size_of::<DrawTransform>();
 
 pub const MATERIAL_BIND_GROUP_GLOBALS: usize = 0;
 pub const MATERIAL_BIND_GROUP_TEXTURES: usize = 1;
 pub const MATERIAL_BIND_GROUP_PARAMS: usize = 2;
 pub const MATERIAL_BIND_GROUP_PERDRAW: usize = 3;
+
+/// One entity's draw before batching.
+struct Draw {
+    key: RenderQueueKey,
+    // To the camera, for the translucent back-to-front sort
+    distance_squared: f32,
+    current: DrawTransform,
+    previous: DrawTransform,
+}
 
 /// One instanced draw: a run of equal render keys (same material and mesh) in the sorted
 /// per-draw array; instances `first..first + count` of the storage buffer.
@@ -161,6 +165,8 @@ struct PassPBROpaqueState {
     prefilter_sampler: wgpu::Sampler,
     brdf_lut_sampler: wgpu::Sampler,
     per_draw_buffer: wgpu::Buffer,
+    // Last frame's transforms; a single entry when the pass writes no motion vectors (never read)
+    previous_per_draw_buffer: wgpu::Buffer,
     per_draw_bind_group: wgpu::BindGroup,
     bg: BgSubState,
     // IBL handles the current globals_bind_group was built from; rebuild only when these change.
@@ -286,15 +292,18 @@ pub struct PassPBROpaque {
     // [diffuse, specular, brdf_lut] for the first frame's bind group
     initial_ibl: [PassTextureHandle; 3],
     capacity_warned: bool,
-    // Motion history: last frame's transform per entity slot and camera view-projection
+    // Motion history (only with a velocity target): last frame's transform per entity slot, the
+    // scene it belongs to and the camera view-projection
     frame: u64,
     previous_transforms: Vec<Option<PreviousTransform>>,
     previous_view_projection: Option<Matrix4f>,
     motion_history_epoch: u32,
+    history_scene: usize,
     // Per-frame scratch, capacity reused across frames; f32 = squared camera distance (translucent sort)
-    draws: Vec<(RenderQueueKey, f32, PerDrawStd140)>,
+    draws: Vec<Draw>,
     batches: Vec<DrawBatch>,
     staging_buffer: Vec<u8>,
+    previous_staging_buffer: Vec<u8>,
     state: Option<PassPBROpaqueState>,
 }
 
@@ -322,11 +331,44 @@ impl PassPBROpaque {
             previous_transforms: Vec::new(),
             previous_view_projection: None,
             motion_history_epoch: 0,
+            history_scene: 0,
             draws: Vec::with_capacity(max_instances),
             batches: Vec::new(),
             staging_buffer: Vec::with_capacity(max_instances * PER_DRAW_STRIDE_BYTES),
+            previous_staging_buffer: Vec::new(),
             state: None,
         }
+    }
+
+    /// Motion vectors (and with them the per-entity history) only when a velocity target is set.
+    fn writes_motion_vectors(&self) -> bool {
+        self.velocity_target.is_some()
+    }
+
+    /// Last frame's transform of `entity`, recording `current` for the next frame. An entity not
+    /// drawn last frame, or a different entity in a reused slot (version changed), has no motion.
+    fn previous_transform(
+        &mut self,
+        entity: EntityHandle,
+        current: DrawTransform,
+    ) -> DrawTransform {
+        let slot = entity.data().index as usize;
+        let version = entity.data().version;
+        if self.previous_transforms.len() <= slot {
+            self.previous_transforms.resize(slot + 1, None);
+        }
+        let previous = match self.previous_transforms[slot] {
+            Some(previous) if previous.frame + 1 == self.frame && previous.version == version => {
+                previous.transform
+            }
+            _ => current,
+        };
+        self.previous_transforms[slot] = Some(PreviousTransform {
+            transform: current,
+            version,
+            frame: self.frame,
+        });
+        previous
     }
 
     pub fn max_instances(&self) -> usize {
@@ -523,17 +565,20 @@ impl Pass for PassPBROpaque {
             material_textures_layout_entries(),
             // 2: material params
             material_params_layout_entries(),
-            // 3: per-draw storage array — no dynamic offset, no 256-B Metal alignment (Apple Metal Spec §4.1.1).
-            vec![wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            // 3: per-draw storage arrays (this and last frame's transforms) — no dynamic offset,
+            // no 256-B Metal alignment (Apple Metal Spec §4.1.1).
+            (0..2)
+                .map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                })
+                .collect(),
         ];
 
         let color_targets = self.color_targets(if self.translucent {
@@ -596,16 +641,32 @@ impl Pass for PassPBROpaque {
             byte_size: (PER_DRAW_STRIDE_BYTES * self.max_instances) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         })?;
+        let previous_capacity = if self.writes_motion_vectors() {
+            self.max_instances
+        } else {
+            1
+        };
+        let previous_per_draw_buffer = renderer.create_buffer(BufferDesc {
+            label: Some("pass_pbr_opaque_previous_per_draw"),
+            byte_size: (PER_DRAW_STRIDE_BYTES * previous_capacity) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        })?;
         let per_draw_bind_group = {
             let layout = &pipeline.bind_group_layouts[MATERIAL_BIND_GROUP_PERDRAW];
             let device = renderer.get_device();
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pass_pbr_opaque_per_draw_bind_group"),
                 layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: per_draw_buffer.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: per_draw_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: previous_per_draw_buffer.as_entire_binding(),
+                    },
+                ],
             })
         };
 
@@ -802,6 +863,7 @@ impl Pass for PassPBROpaque {
             prefilter_sampler,
             brdf_lut_sampler,
             per_draw_buffer,
+            previous_per_draw_buffer,
             per_draw_bind_group,
             bg,
             cached_ibl,
@@ -818,8 +880,6 @@ impl Pass for PassPBROpaque {
         world: &WorldQuery<'_>,
     ) -> Result<()> {
         // Query per-entity storages + the global render state (bg/IBL/fog) this pass needs.
-        let transform_components = world.query::<TransformComponent>()?;
-        let mesh_rendering_components = world.query::<MeshRenderingComponent>()?;
         let render_state = world.get_global::<RenderStateComponent>()?;
 
         // Rebuild the IBL globals bind group only when the component's handles change (steady state: 0).
@@ -878,10 +938,15 @@ impl Pass for PassPBROpaque {
 
         let (active_camera_component, active_camera_transform) = world.active_camera()?;
 
-        // Motion history: a reset (camera cut) makes this frame's previous transforms = current
+        // Motion history: a reset (camera cut) or another scene makes this frame's previous
+        // transforms = current
+        let motion_vectors = self.writes_motion_vectors();
         self.frame += 1;
-        if self.motion_history_epoch != render_state.motion_history_epoch {
+        if self.motion_history_epoch != render_state.motion_history_epoch
+            || self.history_scene != world.scene_id()
+        {
             self.motion_history_epoch = render_state.motion_history_epoch;
+            self.history_scene = world.scene_id();
             self.previous_transforms.clear();
             self.previous_view_projection = None;
         }
@@ -901,6 +966,7 @@ impl Pass for PassPBROpaque {
                 .update_data(active_camera_component, active_camera_transform);
             state.camera_uniform.previous_view_projection_matrix =
                 previous_view_projection.to_cols_array_2d();
+            state.camera_uniform.flags = [motion_vectors as u32 as f32, 0.0, 0.0, 0.0];
             renderer.get_queue().write_buffer(
                 &state.camera_buffer,
                 0,
@@ -917,20 +983,9 @@ impl Pass for PassPBROpaque {
         // them by material, then mesh (depth-tested, so order doesn't matter). Translucent: back to
         // front; equal neighbouring keys still share an instanced draw, which keeps that order.
         self.draws.clear();
-        let transforms = &transform_components.data;
-        let mesh_renderings = &mesh_rendering_components.data;
-        if self.previous_transforms.len() < transforms.len() {
-            self.previous_transforms.resize(transforms.len(), None);
-        }
-        for (slot, (slot_transform, slot_mesh_rendering)) in
-            transforms.iter().zip(mesh_renderings.iter()).enumerate()
+        for (entity, transform, mesh_rendering) in
+            world.query_two::<TransformComponent, MeshRenderingComponent>()?
         {
-            let Some(transform) = slot_transform else {
-                continue;
-            };
-            let Some(mesh_rendering) = slot_mesh_rendering else {
-                continue;
-            };
             let Some(key) = mesh_rendering.render_queue_key else {
                 continue;
             };
@@ -950,33 +1005,40 @@ impl Pass for PassPBROpaque {
                 break;
             }
             let current = DrawTransform::from(transform);
-            // An entity not drawn last frame (new, re-shown or a reused slot) has no motion yet
-            let previous = match self.previous_transforms[slot] {
-                Some(previous) if previous.frame + 1 == self.frame => previous.transform,
-                _ => current,
+            let previous = if motion_vectors {
+                self.previous_transform(entity, current)
+            } else {
+                current
             };
-            self.previous_transforms[slot] = Some(PreviousTransform {
-                transform: current,
-                frame: self.frame,
-            });
             let distance_squared =
                 (transform.position - active_camera_transform.position).length_squared();
-            self.draws
-                .push((key, distance_squared, PerDrawStd140 { current, previous }));
+            self.draws.push(Draw {
+                key,
+                distance_squared,
+                current,
+                previous,
+            });
         }
         if self.translucent {
-            self.draws.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            self.draws
+                .sort_unstable_by(|a, b| b.distance_squared.total_cmp(&a.distance_squared));
         } else {
-            self.draws.sort_unstable_by_key(|(key, _, _)| *key);
+            self.draws.sort_unstable_by_key(|draw| draw.key);
         }
 
         // One batch per run of equal keys; the key is decoded once per batch
         self.batches.clear();
         self.staging_buffer.clear();
-        for (index, (key, _, per_draw)) in self.draws.iter().enumerate() {
+        self.previous_staging_buffer.clear();
+        for (index, draw) in self.draws.iter().enumerate() {
+            let key = &draw.key;
             self.staging_buffer
-                .extend_from_slice(bytemuck::bytes_of(per_draw));
-            if index > 0 && self.draws[index - 1].0 == *key {
+                .extend_from_slice(bytemuck::bytes_of(&draw.current));
+            if motion_vectors {
+                self.previous_staging_buffer
+                    .extend_from_slice(bytemuck::bytes_of(&draw.previous));
+            }
+            if index > 0 && self.draws[index - 1].key == *key {
                 if let Some(batch) = self.batches.last_mut() {
                     batch.count += 1;
                 }
@@ -1004,6 +1066,13 @@ impl Pass for PassPBROpaque {
             renderer
                 .get_queue()
                 .write_buffer(&state_ref.per_draw_buffer, 0, &self.staging_buffer);
+            if motion_vectors {
+                renderer.get_queue().write_buffer(
+                    &state_ref.previous_per_draw_buffer,
+                    0,
+                    &self.previous_staging_buffer,
+                );
+            }
         }
 
         let depth_view = renderer

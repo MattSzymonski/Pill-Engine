@@ -73,6 +73,22 @@ impl<'a> WorldQuery<'a> {
         self.scene.get_component_storage::<T>()
     }
 
+    /// Entities having both `A` and `B`, with their (versioned) handles.
+    pub fn query_two<A, B>(
+        &self,
+    ) -> Result<impl Iterator<Item = (EntityHandle, &'a A, &'a B)> + use<'a, A, B>>
+    where
+        A: Component<Storage = ComponentStorage<A>>,
+        B: Component<Storage = ComponentStorage<B>>,
+    {
+        self.scene.get_two_component_iterator::<A, B>()
+    }
+
+    /// Identifies the active scene within a frame sequence (changes when another scene renders).
+    pub fn scene_id(&self) -> usize {
+        self.scene as *const Scene as usize
+    }
+
     /// Camera and transform components of the active camera entity.
     pub fn active_camera(&self) -> Result<(&'a CameraComponent, &'a TransformComponent)> {
         let index = self.active_camera.data().index as usize;
