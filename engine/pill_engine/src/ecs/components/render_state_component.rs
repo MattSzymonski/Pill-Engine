@@ -12,6 +12,33 @@ pub enum Tonemap {
     None,
     /// Extended Reinhard c·(1 + c/W²)/(1 + c): `white_point` W maps to 1.0; INFINITY = plain c/(1 + c).
     Reinhard { white_point: f32 },
+    /// Lottes' filmic curve x^a / (x^(a·d)·b + c) per channel (GDC 2016, "Advanced Techniques and
+    /// Optimization of VDR Color Pipelines"); b and c are solved so `mid_in` maps to `mid_out` and
+    /// `hdr_max` to 1. `Tonemap::lottes()` gives the demo's values.
+    Lottes {
+        /// a: toe steepness.
+        contrast: f32,
+        /// d: shoulder speed.
+        shoulder: f32,
+        /// Input mapped to white.
+        hdr_max: f32,
+        /// Middle grey in and out.
+        mid_in: f32,
+        mid_out: f32,
+    },
+}
+
+impl Tonemap {
+    /// Lottes curve with contrast 1.6, shoulder 0.977, white at 8, grey 0.18 → 0.267.
+    pub fn lottes() -> Self {
+        Self::Lottes {
+            contrast: 1.6,
+            shoulder: 0.977,
+            hdr_max: 8.0,
+            mid_in: 0.18,
+            mid_out: 0.267,
+        }
+    }
 }
 
 /// Pass chain the engine builds on the first frame.

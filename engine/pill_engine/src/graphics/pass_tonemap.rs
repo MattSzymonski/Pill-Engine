@@ -22,24 +22,74 @@ struct TonemapState {
 
 /// Mirrors `TonemapParams` in tonemap_fragment.hlsl.
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
 struct TonemapParams {
-    reinhard: f32,              // 1 = Reinhard, 0 = pass-through
-    inverse_white_squared: f32, // 1/W², 0 for an infinite white point
+    mode: u32,                  // 0 = pass-through, 1 = Reinhard, 2 = Lottes
+    inverse_white_squared: f32, // Reinhard: 1/W², 0 for an infinite white point
+    contrast: f32,              // Lottes a
+    shoulder: f32,              // Lottes d
+    b: f32,                     // Lottes b, c (solved from the art parameters)
+    c: f32,
     _padding: [f32; 2],
 }
 
 impl TonemapParams {
     fn from(tonemap: Tonemap) -> Self {
-        let (reinhard, inverse_white_squared) = match tonemap {
-            Tonemap::None => (0.0, 0.0),
-            Tonemap::Reinhard { white_point } => (1.0, 1.0 / (white_point * white_point)),
-        };
-        Self {
-            reinhard,
-            inverse_white_squared,
-            _padding: [0.0; 2],
+        match tonemap {
+            Tonemap::None => Self::default(),
+            Tonemap::Reinhard { white_point } => Self {
+                mode: 1,
+                inverse_white_squared: 1.0 / (white_point * white_point),
+                ..Self::default()
+            },
+            Tonemap::Lottes {
+                contrast,
+                shoulder,
+                hdr_max,
+                mid_in,
+                mid_out,
+            } => {
+                let (b, c) = lottes_bc(contrast, shoulder, hdr_max, mid_in, mid_out);
+                Self {
+                    mode: 2,
+                    contrast,
+                    shoulder,
+                    b,
+                    c,
+                    ..Self::default()
+                }
+            }
         }
+    }
+}
+
+/// b and c of Lottes' curve x^a / (x^(a·d)·b + c) such that `mid_in` → `mid_out` and `hdr_max` → 1.
+fn lottes_bc(a: f32, d: f32, hdr_max: f32, mid_in: f32, mid_out: f32) -> (f32, f32) {
+    let hdr_a = hdr_max.powf(a);
+    let mid_a = mid_in.powf(a);
+    let hdr_ad = hdr_a.powf(d);
+    let mid_ad = mid_a.powf(d);
+    let denominator = (hdr_ad - mid_ad) * mid_out;
+    let b = (hdr_a * mid_out - mid_a) / denominator;
+    let c = (hdr_ad * mid_a - hdr_a * mid_ad * mid_out) / denominator;
+    (b, c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lottes_bc;
+
+    fn lottes(x: f32, a: f32, d: f32, b: f32, c: f32) -> f32 {
+        let xa = x.powf(a);
+        xa / (xa.powf(d) * b + c)
+    }
+
+    #[test]
+    fn lottes_bc_maps_mid_grey_and_white() {
+        let (a, d) = (1.6, 0.977);
+        let (b, c) = lottes_bc(a, d, 8.0, 0.18, 0.267);
+        assert!((lottes(0.18, a, d, b, c) - 0.267).abs() < 1e-4);
+        assert!((lottes(8.0, a, d, b, c) - 1.0).abs() < 1e-4);
     }
 }
 
