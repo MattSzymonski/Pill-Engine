@@ -190,7 +190,8 @@ pub fn post_fx_pass_chain(engine: &mut Engine) -> Result<Vec<Box<dyn Pass>>> {
         depth_target,
         opaque.max_instances(),
         opaque.initial_ibl(),
-    );
+    )
+    .with_velocity_target(velocity_target);
     let mut passes: Vec<Box<dyn Pass>> = vec![
         Box::new(
             opaque

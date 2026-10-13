@@ -441,8 +441,9 @@ fn is_translucent(world: &WorldQuery<'_>, key: RenderQueueKey) -> bool {
 }
 
 /// Translucent PBR: materials with opacity < 1, sorted back to front and alpha-blended over the
-/// HDR target after the opaque pass, depth-tested against (not writing) the opaque depth. Shares
-/// PassPBROpaque's shaders; writes no motion vectors.
+/// HDR target after the opaque pass, depth-tested against the opaque depth. Also writes depth and,
+/// with `with_velocity_target`, motion vectors, so depth of field and motion blur treat the glass
+/// surface as the nearest one. Shares PassPBROpaque's shaders.
 pub struct PassPBRTranslucent(PassPBROpaque);
 
 impl PassPBRTranslucent {
@@ -456,6 +457,11 @@ impl PassPBRTranslucent {
         let mut pass = PassPBROpaque::new(color_target, depth_target, max_instances, initial_ibl);
         pass.translucent = true;
         Self(pass)
+    }
+
+    /// Writes motion vectors (replacing the opaque ones behind) into `target`.
+    pub fn with_velocity_target(self, target: PassTextureHandle) -> Self {
+        Self(self.0.with_velocity_target(target))
     }
 }
 
@@ -601,7 +607,9 @@ impl Pass for PassPBROpaque {
             targets: &color_targets,
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_TARGET_FORMAT,
-                depth_write_enabled: !self.translucent,
+                // Translucent surfaces also write depth (drawn back to front), so the passes after
+                // them (DoF, motion blur) see the glass rather than what is behind it
+                depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
